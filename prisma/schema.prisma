@@ -1,0 +1,685 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ContactStatus {
+  NEW
+  IN_PROGRESS
+  QUALIFIED
+  REJECTED
+  ERROR
+}
+
+enum ImportStatus {
+  PREVIEW
+  READY
+  IMPORTING
+  COMPLETED
+  FAILED
+}
+
+enum ImportRowStatus {
+  VALID
+  INVALID
+  DUPLICATE_IN_FILE
+  DUPLICATE_IN_DATABASE
+  IMPORTED
+}
+
+enum CrmProvider {
+  ZAPIS
+  ALTEGIO
+  YCLIENTS
+  DIKIDI
+  EASYWEEK
+  BOOKSY
+  FRESHA
+  OTHER
+  UNKNOWN
+}
+
+enum BusinessType {
+  BEAUTY_SALON
+  BARBERSHOP
+  COSMETOLOGY
+  CLINIC
+  DENTAL_CLINIC
+  NAIL_STUDIO
+  SPA
+  OTHER
+  UNKNOWN
+}
+
+enum OutreachSkipReason {
+  EXISTING_ZAPIS_CLIENT
+  MISSING_PHONE
+  MANUALLY_EXCLUDED
+}
+
+enum PromptStrategyStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum ConversationStatus {
+  NEW
+  ACTIVE
+  WAITING_CLIENT
+  HANDOFF_REQUIRED
+  QUALIFIED
+  REJECTED
+  CLOSED
+}
+
+enum MessageRole {
+  SYSTEM
+  AI
+  CLIENT
+  MANAGER
+}
+
+enum LeadStatus {
+  NEW
+  QUALIFIED
+  TRANSFERRED
+  CLOSED
+}
+
+enum AiAction {
+  CONTINUE
+  QUALIFY
+  HANDOFF
+  STOP
+  WAIT
+}
+
+enum AiLeadDecision {
+  NOT_READY
+  QUALIFIED
+  REJECTED
+  UNCERTAIN
+}
+
+enum AiRunStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUSED
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+enum CampaignTargetStatus {
+  WAITING
+  READY
+  QUEUED
+  PROCESSING
+  MESSAGE_SENT
+  WAITING_REPLY
+  REPLIED
+  LEAD
+  HANDOFF
+  REJECTED
+  ERROR
+  SKIPPED
+}
+
+enum CampaignSourceType {
+  ALL_CONTACTS
+  IMPORT_JOB
+}
+
+enum WhatsAppConnectionStatus {
+  DISABLED
+  INITIALIZING
+  QR_REQUIRED
+  AUTHENTICATING
+  CONNECTED
+  DISCONNECTED
+  AUTH_FAILURE
+  ERROR
+}
+
+enum WhatsAppMessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum WhatsAppMessageStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  RECEIVED
+  FAILED
+}
+
+enum AutomationEventType {
+  INCOMING_RECEIVED
+  AUTO_REPLY_SCHEDULED
+  AUTO_REPLY_STARTED
+  AI_COMPLETED
+  AI_FAILED
+  WHATSAPP_SENT
+  WHATSAPP_FAILED
+  SKIPPED
+  DEFERRED
+  HANDOFF
+  QUALIFIED
+  REJECTED
+  MEDIA_PROCESSING_FAILED
+}
+
+enum MediaType {
+  AUDIO
+  VOICE
+  IMAGE
+}
+
+enum MediaProcessingStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  SKIPPED
+}
+
+enum TelegramRecipientStatus {
+  PENDING
+  CONNECTED
+  DISABLED
+}
+
+enum TelegramNotificationType {
+  HANDOFF_REQUIRED
+  CLIENT_REQUESTED_MANAGER
+  NEW_LEAD
+  QUALIFIED_LEAD
+  AI_UNCERTAIN
+  AI_FAILED
+  WHATSAPP_FAILED
+  MEDIA_FAILED
+  AUTOMATION_FAILED
+  SYSTEM_ERROR
+}
+
+enum TelegramNotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+model Contact {
+  id               String              @id @default(uuid())
+  companyName      String
+  phone            String              @unique
+  city             String?
+  category         String?
+  website          String?
+  instagram        String?
+  twoGisUrl        String?
+  bookingUrl       String?
+  email            String?
+  address          String?
+  notes            String?
+  rawData          Json?
+  crmProvider      CrmProvider         @default(UNKNOWN)
+  businessType     BusinessType        @default(UNKNOWN)
+  strategyCode     String?
+  outreachEligible Boolean             @default(true)
+  skipReason       OutreachSkipReason?
+  detectedDomains  Json?
+  classifiedAt     DateTime?
+  status           ContactStatus       @default(NEW)
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  conversations    Conversation[]
+  leads            Lead[]
+  campaignTargets  CampaignTarget[]
+  whatsappMessages WhatsAppMessage[]
+  mediaAttachments MediaAttachment[]
+}
+
+model ImportJob {
+  id              String       @id @default(uuid())
+  fileName        String
+  status          ImportStatus @default(PREVIEW)
+  totalRows       Int          @default(0)
+  validRows       Int          @default(0)
+  invalidRows     Int          @default(0)
+  duplicateRows   Int          @default(0)
+  importedRows    Int          @default(0)
+  columnMapping   Json
+  errorMessage    String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  rows            ImportRow[]
+  sourceCampaigns Campaign[]
+}
+
+model ImportRow {
+  id             String          @id @default(uuid())
+  importJobId    String
+  importJob      ImportJob       @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  rowNumber      Int
+  status         ImportRowStatus
+  rawData        Json
+  normalizedData Json?
+  errors         Json?
+  contactId      String?
+  createdAt      DateTime        @default(now())
+
+  @@unique([importJobId, rowNumber])
+  @@index([importJobId, status])
+}
+
+model PromptStrategy {
+  id              String               @id @default(uuid())
+  code            String               @unique
+  name            String
+  description     String?
+  status          PromptStrategyStatus @default(DRAFT)
+  activeVersionId String?              @unique
+  activeVersion   PromptVersion?       @relation("ActivePromptVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
+  versions        PromptVersion[]      @relation("StrategyVersions")
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  conversations   Conversation[]
+  aiRuns          AiRun[]
+}
+
+model PromptVersion {
+  id                     String          @id @default(uuid())
+  strategyId             String
+  strategy               PromptStrategy  @relation("StrategyVersions", fields: [strategyId], references: [id], onDelete: Cascade)
+  version                Int
+  systemInstruction      String
+  objective              String
+  firstMessage           String
+  communicationRules     String
+  qualificationQuestions Json
+  sellingPoints          Json
+  competitorContext      String?
+  handoffRules           String
+  stopRules              String
+  forbiddenActions       Json
+  closingRules           String
+  maxAssistantMessages   Int             @default(5)
+  metadata               Json?
+  changeNote             String?
+  createdAt              DateTime        @default(now())
+  activeForStrategy      PromptStrategy? @relation("ActivePromptVersion")
+  conversations          Conversation[]
+  aiRuns                 AiRun[]
+
+  @@unique([strategyId, version])
+  @@index([strategyId, createdAt])
+}
+
+model Conversation {
+  id                String             @id @default(uuid())
+  contactId         String
+  contact           Contact            @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  strategyCode      String
+  promptStrategyId  String?
+  promptStrategy    PromptStrategy?    @relation(fields: [promptStrategyId], references: [id], onDelete: SetNull)
+  promptVersionId   String?
+  promptVersion     PromptVersion?     @relation(fields: [promptVersionId], references: [id], onDelete: SetNull)
+  status            ConversationStatus @default(NEW)
+  startedAt         DateTime           @default(now())
+  lastMessageAt     DateTime           @default(now())
+  closedAt          DateTime?
+  messageCount      Int                @default(0)
+  metadata          Json?
+  messages          Message[]
+  lead              Lead?
+  aiRuns            AiRun[]
+  whatsappMessages  WhatsAppMessage[]
+  campaignTargets   CampaignTarget[]
+  mediaAttachments  MediaAttachment[]
+  preferredLanguage String?
+
+  @@index([contactId, status])
+  @@index([status, lastMessageAt])
+}
+
+model AiRun {
+  id                 String          @id @default(uuid())
+  conversationId     String
+  conversation       Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  triggerMessageId   String?
+  promptStrategyId   String?
+  promptStrategy     PromptStrategy? @relation(fields: [promptStrategyId], references: [id], onDelete: SetNull)
+  promptVersionId    String?
+  promptVersion      PromptVersion?  @relation(fields: [promptVersionId], references: [id], onDelete: SetNull)
+  model              String
+  status             AiRunStatus     @default(PENDING)
+  action             AiAction?
+  leadDecision       AiLeadDecision?
+  reply              String?
+  summary            String?
+  extractedData      Json?
+  inputTokens        Int?
+  outputTokens       Int?
+  totalTokens        Int?
+  estimatedCostUsd   Decimal?        @db.Decimal(12, 8)
+  latencyMs          Int?
+  providerResponseId String?
+  errorCode          String?
+  errorMessage       String?
+  createdAt          DateTime        @default(now())
+  completedAt        DateTime?
+
+  @@unique([conversationId, triggerMessageId])
+  @@index([conversationId, createdAt])
+  @@index([status])
+}
+
+model Message {
+  id               String            @id @default(uuid())
+  conversationId   String
+  conversation     Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role             MessageRole
+  text             String
+  createdAt        DateTime          @default(now())
+  metadata         Json?
+  whatsappMessages WhatsAppMessage[]
+  mediaAttachments MediaAttachment[]
+
+  @@index([conversationId, createdAt])
+}
+
+model Lead {
+  id                  String       @id @default(uuid())
+  conversationId      String       @unique
+  conversation        Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  contactId           String
+  contact             Contact      @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  status              LeadStatus   @default(NEW)
+  summary             String
+  qualificationReason String
+  extractedData       Json?
+  managerComment      String?
+  transferredAt       DateTime?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  @@index([contactId, status])
+  @@index([status, createdAt])
+}
+
+model Campaign {
+  id                String             @id @default(uuid())
+  name              String
+  description       String?
+  status            CampaignStatus     @default(DRAFT)
+  sourceType        CampaignSourceType
+  sourceImportJobId String?
+  sourceImportJob   ImportJob?         @relation(fields: [sourceImportJobId], references: [id], onDelete: SetNull)
+  filters           Json
+  scheduledAt       DateTime?
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  selectedCount     Int                @default(0)
+  processedCount    Int                @default(0)
+  repliedCount      Int                @default(0)
+  leadCount         Int                @default(0)
+  rejectedCount     Int                @default(0)
+  handoffCount      Int                @default(0)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  settings          CampaignSettings?
+  targets           CampaignTarget[]
+  logs              CampaignLog[]
+
+  @@index([status, createdAt])
+  @@index([sourceImportJobId])
+}
+
+model CampaignSettings {
+  id                String   @id @default(uuid())
+  campaignId        String   @unique
+  campaign          Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  workingHoursStart String
+  workingHoursEnd   String
+  dailyMessageLimit Int
+  minDelaySeconds   Int
+  maxDelaySeconds   Int
+  timezone          String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model CampaignTarget {
+  id                  String               @id @default(uuid())
+  campaignId          String
+  campaign            Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contactId           String
+  contact             Contact              @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  conversationId      String?              @unique
+  conversation        Conversation?        @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  status              CampaignTargetStatus @default(WAITING)
+  strategyCode        String?
+  queuedAt            DateTime?
+  processingStartedAt DateTime?
+  messageSentAt       DateTime?
+  repliedAt           DateTime?
+  completedAt         DateTime?
+  errorMessage        String?
+  metadata            Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+
+  @@unique([campaignId, contactId])
+  @@index([campaignId, status, createdAt])
+  @@index([contactId])
+}
+
+model CampaignLog {
+  id             String   @id @default(uuid())
+  campaignId     String
+  campaign       Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  targetId       String?
+  event          String
+  message        String
+  previousStatus String?
+  newStatus      String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  @@index([campaignId, createdAt])
+  @@index([targetId])
+}
+
+model WhatsAppSession {
+  id                 String                   @id @default(uuid())
+  clientId           String                   @unique
+  status             WhatsAppConnectionStatus
+  phoneNumber        String?
+  displayName        String?
+  lastConnectedAt    DateTime?
+  lastDisconnectedAt DateTime?
+  lastQrAt           DateTime?
+  lastError          String?
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+}
+
+model WhatsAppMessage {
+  id                String                   @id @default(uuid())
+  externalMessageId String?                  @unique
+  direction         WhatsAppMessageDirection
+  status            WhatsAppMessageStatus
+  phone             String
+  text              String
+  contactId         String?
+  contact           Contact?                 @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  conversationId    String?
+  conversation      Conversation?            @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  messageId         String?                  @unique
+  message           Message?                 @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  mediaAttachments  MediaAttachment[]
+  sentAt            DateTime?
+  receivedAt        DateTime?
+  errorMessage      String?
+  createdAt         DateTime                 @default(now())
+
+  @@index([phone, createdAt])
+  @@index([conversationId, createdAt])
+  @@index([contactId, createdAt])
+  @@index([direction, status, createdAt])
+}
+
+model MediaAttachment {
+  id                 String                @id @default(uuid())
+  whatsAppMessageId  String
+  whatsAppMessage    WhatsAppMessage       @relation(fields: [whatsAppMessageId], references: [id], onDelete: Cascade)
+  messageId          String?
+  message            Message?              @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  conversationId     String?
+  conversation       Conversation?         @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  contactId          String?
+  contact            Contact?              @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  type               MediaType
+  processingStatus   MediaProcessingStatus @default(PENDING)
+  mimeType           String
+  originalFilename   String?
+  fileSizeBytes      Int?
+  caption            String?
+  transcription      String?
+  imageDescription   String?
+  providerModel      String?
+  providerResponseId String?
+  inputTokens        Int?
+  outputTokens       Int?
+  totalTokens        Int?
+  estimatedCostUsd   Decimal?              @db.Decimal(12, 8)
+  durationMs         Int?
+  errorCode          String?
+  errorMessage       String?
+  createdAt          DateTime              @default(now())
+  processedAt        DateTime?
+
+  @@unique([whatsAppMessageId, type])
+  @@index([conversationId, createdAt])
+  @@index([contactId, createdAt])
+  @@index([type, processingStatus, createdAt])
+  @@index([messageId])
+}
+
+model AutomationSettings {
+  id                            String   @id @default(uuid())
+  singletonKey                  String   @unique @default("global")
+  enabled                       Boolean  @default(false)
+  autoReplyEnabled              Boolean  @default(false)
+  campaignSendingEnabled        Boolean  @default(false)
+  maxAutoRepliesPerConversation Int      @default(5)
+  responseDelayMinSeconds       Int      @default(3)
+  responseDelayMaxSeconds       Int      @default(8)
+  workingHoursEnabled           Boolean  @default(false)
+  workingHoursStart             String?
+  workingHoursEnd               String?
+  timezone                      String   @default("Asia/Almaty")
+  createdAt                     DateTime @default(now())
+  updatedAt                     DateTime @updatedAt
+}
+
+model AutomationEvent {
+  id                String              @id @default(uuid())
+  type              AutomationEventType
+  contactId         String?
+  conversationId    String?
+  messageId         String?
+  aiRunId           String?
+  whatsAppMessageId String?
+  reason            String?
+  metadata          Json?
+  createdAt         DateTime            @default(now())
+
+  @@index([conversationId, createdAt])
+  @@index([type, createdAt])
+  @@index([createdAt])
+}
+
+model TelegramRecipient {
+  id                 String                  @id @default(uuid())
+  name               String
+  status             TelegramRecipientStatus @default(PENDING)
+  telegramUserId     BigInt?
+  telegramChatId     BigInt?
+  telegramUsername   String?
+  telegramFirstName  String?
+  telegramLastName   String?
+  linkTokenHash      String?                 @unique
+  linkTokenExpiresAt DateTime?
+  connectedAt        DateTime?
+  lastNotificationAt DateTime?
+  isPrimary          Boolean                 @default(false)
+  isActive           Boolean                 @default(true)
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+  notifications      TelegramNotification[]
+
+  @@index([status, isActive])
+  @@index([telegramChatId])
+}
+
+model TelegramNotification {
+  id                String                     @id @default(uuid())
+  recipientId       String?
+  recipient         TelegramRecipient?         @relation(fields: [recipientId], references: [id], onDelete: SetNull)
+  type              TelegramNotificationType
+  status            TelegramNotificationStatus @default(PENDING)
+  contactId         String?
+  conversationId    String?
+  leadId            String?
+  automationEventId String?
+  deduplicationKey  String?                    @unique
+  providerMessageId String?
+  messagePreview    String?
+  errorCode         String?
+  errorMessage      String?
+  createdAt         DateTime                   @default(now())
+  sentAt            DateTime?
+
+  @@index([recipientId, createdAt])
+  @@index([type, status, createdAt])
+}
+
+model TelegramNotificationSettings {
+  id                             String   @id @default(uuid())
+  singletonKey                   String   @unique @default("global")
+  enabled                        Boolean  @default(false)
+  notifyOnHandoff                Boolean  @default(false)
+  notifyOnClientRequestedManager Boolean  @default(false)
+  notifyOnNewLead                Boolean  @default(false)
+  notifyOnQualifiedLead          Boolean  @default(false)
+  notifyOnAiUncertain            Boolean  @default(false)
+  notifyOnAiFailure              Boolean  @default(false)
+  notifyOnWhatsAppFailure        Boolean  @default(false)
+  notifyOnMediaFailure           Boolean  @default(false)
+  notifyOnAutomationFailure      Boolean  @default(false)
+  notifyOnSystemError            Boolean  @default(false)
+  createdAt                      DateTime @default(now())
+  updatedAt                      DateTime @updatedAt
+}

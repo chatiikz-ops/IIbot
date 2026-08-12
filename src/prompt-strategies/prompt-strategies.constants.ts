@@ -1,0 +1,30 @@
+export const SYSTEM_STRATEGY_CODES = [
+  'BEAUTY_GENERAL',
+  'BEAUTY_COMPETITOR',
+  'BARBERSHOP_GENERAL',
+  'BARBERSHOP_COMPETITOR',
+  'COSMETOLOGY_GENERAL',
+  'COSMETOLOGY_COMPETITOR',
+  'CLINIC_GENERAL',
+  'CLINIC_COMPETITOR',
+  'DENTAL_GENERAL',
+  'DENTAL_COMPETITOR',
+  'NAIL_GENERAL',
+  'NAIL_COMPETITOR',
+  'SPA_GENERAL',
+  'SPA_COMPETITOR',
+  'GENERIC_GENERAL',
+  'GENERIC_COMPETITOR',
+  'SKIP_EXISTING_CLIENT',
+] as const;
+
+export const ALLOWED_PROMPT_VARIABLES = [
+  'companyName',
+  'city',
+  'category',
+  'businessType',
+  'crmProvider',
+  'strategyCode',
+  'website',
+  'bookingUrl',
+] as const;

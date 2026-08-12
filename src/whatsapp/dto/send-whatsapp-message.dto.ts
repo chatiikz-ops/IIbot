@@ -1,0 +1,12 @@
+import { IsNotEmpty, IsString, MaxLength, MinLength } from 'class-validator';
+
+export class SendWhatsAppMessageDto {
+  @IsString()
+  @IsNotEmpty()
+  phone!: string;
+
+  @IsString()
+  @MinLength(1)
+  @MaxLength(2000)
+  text!: string;
+}

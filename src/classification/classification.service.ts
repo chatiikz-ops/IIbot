@@ -1,0 +1,202 @@
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BusinessType,
+  CrmProvider,
+  ImportRowStatus,
+  OutreachSkipReason,
+} from '../generated/prisma/enums';
+import type { Contact } from '../generated/prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import {
+  detectBusinessType,
+  detectCrmProvider,
+  determineStrategy,
+} from './utils/classification.util';
+import { extractDomain, extractDomains } from './utils/domain.util';
+
+@Injectable()
+export class ClassificationService {
+  private readonly logger = new Logger(ClassificationService.name);
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  async classifyContact(id: string) {
+    const contact = await this.prisma.contact.findUnique({ where: { id } });
+    if (!contact) throw new NotFoundException('Контакт не найден');
+    return this.classifyAndSave(contact);
+  }
+
+  async classifyImport(importId: string) {
+    const job = await this.prisma.importJob.findUnique({
+      where: { id: importId },
+      select: { id: true },
+    });
+    if (!job) throw new NotFoundException('Импорт не найден');
+
+    const rows = await this.prisma.importRow.findMany({
+      where: {
+        importJobId: importId,
+        status: ImportRowStatus.IMPORTED,
+        contactId: { not: null },
+      },
+      select: { contactId: true },
+      distinct: ['contactId'],
+    });
+    return this.classifyContactIds(
+      rows.flatMap(({ contactId }) => (contactId ? [contactId] : [])),
+    );
+  }
+
+  async classifyAll(force = false) {
+    const contacts = await this.prisma.contact.findMany({
+      where: force ? {} : { classifiedAt: null },
+      select: { id: true },
+    });
+    return this.classifyContactIds(contacts.map(({ id }) => id));
+  }
+
+  async classifyContactIds(ids: string[]) {
+    const uniqueIds = [...new Set(ids)];
+    const contacts = await this.prisma.contact.findMany({
+      where: { id: { in: uniqueIds } },
+    });
+    const classified: Contact[] = [];
+
+    for (const contact of contacts) {
+      try {
+        classified.push(await this.classifyAndSave(contact));
+      } catch {
+        this.logger.error('Classification failed for a contact');
+        try {
+          classified.push(
+            await this.prisma.contact.update({
+              where: { id: contact.id },
+              data: {
+                crmProvider: CrmProvider.UNKNOWN,
+                businessType: BusinessType.UNKNOWN,
+                strategyCode: 'GENERIC_GENERAL',
+                detectedDomains: [],
+                classifiedAt: new Date(),
+              },
+            }),
+          );
+        } catch {
+          this.logger.error('Failed to save classification fallback');
+        }
+      }
+    }
+
+    return this.summarize(classified);
+  }
+
+  async getStats() {
+    const [crm, business, strategies, outreach, skipReasons] =
+      await Promise.all([
+        this.prisma.contact.groupBy({ by: ['crmProvider'], _count: true }),
+        this.prisma.contact.groupBy({ by: ['businessType'], _count: true }),
+        this.prisma.contact.groupBy({ by: ['strategyCode'], _count: true }),
+        this.prisma.contact.groupBy({ by: ['outreachEligible'], _count: true }),
+        this.prisma.contact.groupBy({ by: ['skipReason'], _count: true }),
+      ]);
+
+    return {
+      crmProvider: Object.fromEntries(
+        crm.map((row) => [row.crmProvider, row._count]),
+      ),
+      businessType: Object.fromEntries(
+        business.map((row) => [row.businessType, row._count]),
+      ),
+      strategyCode: Object.fromEntries(
+        strategies.map((row) => [row.strategyCode ?? 'NONE', row._count]),
+      ),
+      outreachEligible: Object.fromEntries(
+        outreach.map((row) => [String(row.outreachEligible), row._count]),
+      ),
+      skipReason: Object.fromEntries(
+        skipReasons.map((row) => [row.skipReason ?? 'NONE', row._count]),
+      ),
+    };
+  }
+
+  private async classifyAndSave(contact: Contact) {
+    const rawValues = this.rawStringValues(contact.rawData);
+    const domains = extractDomains([
+      contact.website,
+      contact.bookingUrl,
+      contact.instagram,
+      contact.twoGisUrl,
+      ...rawValues,
+    ]);
+    const crmProvider = detectCrmProvider(
+      domains,
+      extractDomain(contact.bookingUrl),
+    );
+    const businessType = detectBusinessType([
+      contact.category,
+      contact.companyName,
+      ...rawValues,
+    ]);
+    const strategyCode = determineStrategy(businessType, crmProvider);
+    const isZapis = crmProvider === CrmProvider.ZAPIS;
+    const preserveManualSkip =
+      contact.skipReason === OutreachSkipReason.MANUALLY_EXCLUDED ||
+      contact.skipReason === OutreachSkipReason.MISSING_PHONE;
+
+    return this.prisma.contact.update({
+      where: { id: contact.id },
+      data: {
+        crmProvider,
+        businessType,
+        strategyCode,
+        detectedDomains: domains,
+        classifiedAt: new Date(),
+        outreachEligible: isZapis
+          ? false
+          : preserveManualSkip
+            ? contact.outreachEligible
+            : true,
+        skipReason: isZapis
+          ? OutreachSkipReason.EXISTING_ZAPIS_CLIENT
+          : preserveManualSkip
+            ? contact.skipReason
+            : null,
+      },
+    });
+  }
+
+  private summarize(contacts: Contact[]) {
+    const businessTypes: Record<string, number> = {};
+    const strategies: Record<string, number> = {};
+    let zapisClientsSkipped = 0;
+    let competitorUsers = 0;
+    let unknownCrm = 0;
+
+    for (const contact of contacts) {
+      businessTypes[contact.businessType] =
+        (businessTypes[contact.businessType] ?? 0) + 1;
+      const strategy = contact.strategyCode ?? 'NONE';
+      strategies[strategy] = (strategies[strategy] ?? 0) + 1;
+      if (contact.crmProvider === CrmProvider.ZAPIS) zapisClientsSkipped += 1;
+      else if (contact.crmProvider === CrmProvider.UNKNOWN) unknownCrm += 1;
+      else competitorUsers += 1;
+    }
+
+    return {
+      processed: contacts.length,
+      zapisClientsSkipped,
+      competitorUsers,
+      unknownCrm,
+      businessTypes,
+      strategies,
+    };
+  }
+
+  private rawStringValues(rawData: unknown): string[] {
+    if (!rawData || typeof rawData !== 'object' || Array.isArray(rawData)) {
+      return [];
+    }
+    return Object.values(rawData).filter(
+      (value): value is string => typeof value === 'string',
+    );
+  }
+}
