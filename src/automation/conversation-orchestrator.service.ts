@@ -315,6 +315,12 @@ export class ConversationOrchestratorService {
       await this.skip(input, 'AUTOMATION_DISABLED_AFTER_SCHEDULE');
       return;
     }
+    try {
+      await this.contacts.findOne(input.contactId);
+    } catch {
+      await this.skip(input, 'CONTACT_NOT_ACTIVE');
+      return;
+    }
     if (
       await this.ai.hasProcessedMessage(input.conversationId, input.messageId)
     ) {
@@ -511,8 +517,10 @@ export class ConversationOrchestratorService {
   private assertContactEligible(contact: {
     outreachEligible: boolean;
     crmProvider: CrmProvider;
+    deletedAt?: Date | null;
   }) {
     if (
+      contact.deletedAt ||
       !contact.outreachEligible ||
       contact.crmProvider === CrmProvider.ZAPIS
     ) {

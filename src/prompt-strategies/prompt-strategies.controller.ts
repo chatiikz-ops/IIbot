@@ -13,16 +13,20 @@ import { CreatePromptStrategyDto } from './dto/create-prompt-strategy.dto';
 import { CreatePromptVersionDto } from './dto/create-prompt-version.dto';
 import { PromptStrategiesQueryDto } from './dto/prompt-strategies-query.dto';
 import { PromptStrategiesService } from './prompt-strategies.service';
+import { Roles } from '../auth/auth.decorators';
+import { AdminRole } from '../generated/prisma/enums';
 
 @Controller('prompt-strategies')
 export class PromptStrategiesController {
   constructor(private readonly service: PromptStrategiesService) {}
 
+  @Roles(AdminRole.OWNER)
   @Post()
   create(@Body() data: CreatePromptStrategyDto) {
     return this.service.create(data);
   }
 
+  @Roles(AdminRole.OWNER)
   @Post('seed')
   seed() {
     return this.service.seed();
@@ -48,6 +52,7 @@ export class PromptStrategiesController {
     return this.service.findOne(id);
   }
 
+  @Roles(AdminRole.OWNER)
   @Post(':id/versions')
   createVersion(
     @Param('id', ParseUUIDPipe) id: string,
@@ -64,6 +69,7 @@ export class PromptStrategiesController {
     return this.service.findVersion(id, version);
   }
 
+  @Roles(AdminRole.OWNER)
   @Post(':id/versions/:version/activate')
   activateVersion(
     @Param('id', ParseUUIDPipe) id: string,
@@ -72,16 +78,19 @@ export class PromptStrategiesController {
     return this.service.activateVersion(id, version);
   }
 
+  @Roles(AdminRole.OWNER)
   @Post(':id/archive')
   archive(@Param('id', ParseUUIDPipe) id: string) {
     return this.service.archive(id);
   }
 
+  @Roles(AdminRole.OWNER)
   @Post(':id/restore')
   restore(@Param('id', ParseUUIDPipe) id: string) {
     return this.service.restore(id);
   }
 
+  @Roles(AdminRole.OWNER)
   @Delete(':id')
   remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.service.remove(id);

@@ -9,6 +9,14 @@
 * 🟢 You can import this file directly.
 */
 
+export const AdminRole = {
+  OWNER: 'OWNER',
+  MANAGER: 'MANAGER'
+} as const
+
+export type AdminRole = (typeof AdminRole)[keyof typeof AdminRole]
+
+
 export const ContactStatus = {
   NEW: 'NEW',
   IN_PROGRESS: 'IN_PROGRESS',

@@ -12,6 +12,7 @@ import {
 import { ContactsQueryDto } from './dto/contacts-query.dto';
 import { CreateContactDto } from './dto/create-contact.dto';
 import { UpdateContactDto } from './dto/update-contact.dto';
+import { DeletedContactsQueryDto } from './dto/deleted-contacts-query.dto';
 import { ContactsService } from './contacts.service';
 
 @Controller('contacts')
@@ -26,6 +27,16 @@ export class ContactsController {
   @Get()
   findAll(@Query() query: ContactsQueryDto) {
     return this.contactsService.findAll(query);
+  }
+
+  @Get('deleted')
+  findDeleted(@Query() query: DeletedContactsQueryDto) {
+    return this.contactsService.findDeleted(query);
+  }
+
+  @Post(':id/restore')
+  restore(@Param('id', ParseUUIDPipe) id: string) {
+    return this.contactsService.restore(id);
   }
 
   @Get(':id')

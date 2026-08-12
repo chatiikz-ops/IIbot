@@ -82,8 +82,8 @@ export class WhatsAppMessagingService {
       },
     });
     if (!message) throw new NotFoundException('AI-сообщение не найдено');
-    const contact = await this.prisma.contact.findUnique({
-      where: { id: data.contactId },
+    const contact = await this.prisma.contact.findFirst({
+      where: { id: data.contactId, deletedAt: null },
       select: { id: true },
     });
     if (!contact) throw new NotFoundException('Контакт не найден');
@@ -178,8 +178,8 @@ export class WhatsAppMessagingService {
   }
 
   async sendToContact(contactId: string, data: SendContactWhatsAppMessageDto) {
-    const contact = await this.prisma.contact.findUnique({
-      where: { id: contactId },
+    const contact = await this.prisma.contact.findFirst({
+      where: { id: contactId, deletedAt: null },
     });
     if (!contact) throw new NotFoundException('Контакт не найден');
     if (!contact.outreachEligible) {
@@ -327,7 +327,9 @@ export class WhatsAppMessagingService {
 
     try {
       const stored = await this.prisma.$transaction(async (tx) => {
-        const contact = await tx.contact.findUnique({ where: { phone } });
+        const contact = await tx.contact.findFirst({
+          where: { phone, deletedAt: null },
+        });
         if (!contact) {
           return tx.whatsAppMessage.create({
             data: {
@@ -415,7 +417,9 @@ export class WhatsAppMessagingService {
     if (!phone) return;
     try {
       const stored = await this.prisma.$transaction(async (tx) => {
-        const contact = await tx.contact.findUnique({ where: { phone } });
+        const contact = await tx.contact.findFirst({
+          where: { phone, deletedAt: null },
+        });
         const conversation = contact
           ? await this.findOrCreateConversation(
               tx,

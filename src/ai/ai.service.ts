@@ -38,6 +38,9 @@ export class AiService {
       include: { contact: true, messages: { select: { id: true }, take: 1 } },
     });
     if (!conversation) throw new NotFoundException('Разговор не найден');
+    if (conversation.contact.deletedAt) {
+      throw new ForbiddenException('Контакт удалён');
+    }
     if (!conversation.contact.outreachEligible) {
       throw new ForbiddenException(
         'Контакт исключён из автоматической обработки',
@@ -87,8 +90,12 @@ export class AiService {
   ) {
     const conversation = await this.prisma.conversation.findUnique({
       where: { id: conversationId },
+      include: { contact: { select: { deletedAt: true } } },
     });
     if (!conversation) throw new NotFoundException('Разговор не найден');
+    if (conversation.contact.deletedAt) {
+      throw new ForbiddenException('Контакт удалён');
+    }
     if (conversation.status === ConversationStatus.CLOSED) {
       throw new ConflictException('Разговор закрыт');
     }

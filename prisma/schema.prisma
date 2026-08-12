@@ -13,6 +13,43 @@ datasource db {
   provider = "postgresql"
 }
 
+enum AdminRole {
+  OWNER
+  MANAGER
+}
+
+model AdminUser {
+  id                 String         @id @default(uuid())
+  email              String         @unique
+  name               String
+  passwordHash       String
+  role               AdminRole      @default(MANAGER)
+  isActive           Boolean        @default(true)
+  mustChangePassword Boolean        @default(true)
+  lastLoginAt        DateTime?
+  passwordChangedAt  DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  sessions           AdminSession[]
+}
+
+model AdminSession {
+  id                String    @id @default(uuid())
+  userId            String
+  refreshTokenHash  String
+  previousTokenHash String?
+  userAgent         String?
+  ipAddress         String?
+  createdAt         DateTime  @default(now())
+  expiresAt         DateTime
+  lastUsedAt        DateTime?
+  revokedAt         DateTime?
+  user              AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
 enum ContactStatus {
   NEW
   IN_PROGRESS
@@ -232,7 +269,7 @@ enum TelegramNotificationStatus {
 model Contact {
   id               String              @id @default(uuid())
   companyName      String
-  phone            String              @unique
+  phone            String
   city             String?
   category         String?
   website          String?
@@ -253,11 +290,16 @@ model Contact {
   status           ContactStatus       @default(NEW)
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
+  deletedAt        DateTime?
+  deletedBy        String?
+  deletionReason   String?
   conversations    Conversation[]
   leads            Lead[]
   campaignTargets  CampaignTarget[]
   whatsappMessages WhatsAppMessage[]
   mediaAttachments MediaAttachment[]
+
+  @@index([deletedAt])
 }
 
 model ImportJob {

@@ -330,8 +330,8 @@ export class CampaignsService {
   async addTarget(campaignId: string, data: CreateCampaignTargetDto) {
     const campaign = await this.getCampaign(campaignId);
     this.assertEditable(campaign.status);
-    const contact = await this.prisma.contact.findUnique({
-      where: { id: data.contactId },
+    const contact = await this.prisma.contact.findFirst({
+      where: { id: data.contactId, deletedAt: null },
     });
     if (!contact) throw new NotFoundException('Контакт не найден');
     try {

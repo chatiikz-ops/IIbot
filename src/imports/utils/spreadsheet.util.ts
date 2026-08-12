@@ -1,7 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import * as path from 'node:path';
 import * as XLSX from 'xlsx';
-import type { RawImportRow } from '../imports.types';
 
 const SUPPORTED_EXTENSIONS = new Set(['.xlsx', '.xls', '.csv']);
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -94,6 +93,13 @@ function toNullableString(value: unknown): string | null {
     return null;
   }
 
-  const normalized = String(value).trim();
+  const normalized =
+    typeof value === 'string'
+      ? value.trim()
+      : typeof value === 'number' || typeof value === 'boolean'
+        ? String(value)
+        : value instanceof Date
+          ? value.toISOString()
+          : '';
   return normalized.length > 0 ? normalized : null;
 }

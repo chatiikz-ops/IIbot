@@ -1,0 +1,2 @@
+import { SetMetadata } from '@nestjs/common';import { AdminRole } from '../generated/prisma/enums';
+export const IS_PUBLIC_KEY='isPublic';export const Public=()=>SetMetadata(IS_PUBLIC_KEY,true);export const ROLES_KEY='roles';export const Roles=(...roles:AdminRole[])=>SetMetadata(ROLES_KEY,roles);export const ALLOW_PASSWORD_CHANGE_KEY='allowPasswordChange';export const AllowPasswordChange=()=>SetMetadata(ALLOW_PASSWORD_CHANGE_KEY,true);

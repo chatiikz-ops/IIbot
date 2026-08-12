@@ -62,6 +62,7 @@ export class CampaignSelectionService {
     }
 
     return {
+      deletedAt: null,
       ...(sourceContactIds ? { id: { in: sourceContactIds } } : {}),
       businessType: filters.businessType,
       crmProvider: filters.crmProvider,

@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '../generated/prisma/client';
 import {
   AiRunStatus,
   ConversationStatus,

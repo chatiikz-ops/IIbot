@@ -15,17 +15,17 @@ export class ConversationsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async create(data: CreateConversationDto) {
+    const contact = await this.prisma.contact.findFirst({
+      where: { id: data.contactId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!contact) throw new NotFoundException('Контакт не найден');
+
     const active = await this.prisma.conversation.findFirst({
       where: { contactId: data.contactId, status: ConversationStatus.ACTIVE },
       orderBy: { startedAt: 'desc' },
     });
     if (active) return active;
-
-    const contact = await this.prisma.contact.findUnique({
-      where: { id: data.contactId },
-      select: { id: true },
-    });
-    if (!contact) throw new NotFoundException('Контакт не найден');
 
     if (data.promptVersionId) {
       const version = await this.prisma.promptVersion.findUnique({

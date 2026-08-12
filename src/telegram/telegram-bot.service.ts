@@ -134,9 +134,13 @@ export class TelegramBotService implements OnModuleInit, OnApplicationShutdown {
   private async request(method: string, body: Record<string, unknown>) {
     if (!this.config.token) throw new Error('TELEGRAM_NOT_CONFIGURED');
     let lastError: unknown;
+    const requestTimeoutMs =
+      method === 'getUpdates'
+        ? Math.max(this.config.timeoutMs, 25_000)
+        : this.config.timeoutMs;
     for (let attempt = 0; attempt <= 2; attempt += 1) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
+      const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
       try {
         const response = await fetch(
           `https://api.telegram.org/bot${this.config.token}/${method}`,

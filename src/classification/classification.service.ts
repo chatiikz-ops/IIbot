@@ -21,7 +21,9 @@ export class ClassificationService {
   constructor(private readonly prisma: PrismaService) {}
 
   async classifyContact(id: string) {
-    const contact = await this.prisma.contact.findUnique({ where: { id } });
+    const contact = await this.prisma.contact.findFirst({
+      where: { id, deletedAt: null },
+    });
     if (!contact) throw new NotFoundException('Контакт не найден');
     return this.classifyAndSave(contact);
   }
@@ -49,7 +51,9 @@ export class ClassificationService {
 
   async classifyAll(force = false) {
     const contacts = await this.prisma.contact.findMany({
-      where: force ? {} : { classifiedAt: null },
+      where: force
+        ? { deletedAt: null }
+        : { classifiedAt: null, deletedAt: null },
       select: { id: true },
     });
     return this.classifyContactIds(contacts.map(({ id }) => id));
@@ -58,7 +62,7 @@ export class ClassificationService {
   async classifyContactIds(ids: string[]) {
     const uniqueIds = [...new Set(ids)];
     const contacts = await this.prisma.contact.findMany({
-      where: { id: { in: uniqueIds } },
+      where: { id: { in: uniqueIds }, deletedAt: null },
     });
     const classified: Contact[] = [];
 
@@ -70,7 +74,7 @@ export class ClassificationService {
         try {
           classified.push(
             await this.prisma.contact.update({
-              where: { id: contact.id },
+              where: { id: contact.id, deletedAt: null },
               data: {
                 crmProvider: CrmProvider.UNKNOWN,
                 businessType: BusinessType.UNKNOWN,
@@ -92,11 +96,31 @@ export class ClassificationService {
   async getStats() {
     const [crm, business, strategies, outreach, skipReasons] =
       await Promise.all([
-        this.prisma.contact.groupBy({ by: ['crmProvider'], _count: true }),
-        this.prisma.contact.groupBy({ by: ['businessType'], _count: true }),
-        this.prisma.contact.groupBy({ by: ['strategyCode'], _count: true }),
-        this.prisma.contact.groupBy({ by: ['outreachEligible'], _count: true }),
-        this.prisma.contact.groupBy({ by: ['skipReason'], _count: true }),
+        this.prisma.contact.groupBy({
+          by: ['crmProvider'],
+          where: { deletedAt: null },
+          _count: true,
+        }),
+        this.prisma.contact.groupBy({
+          by: ['businessType'],
+          where: { deletedAt: null },
+          _count: true,
+        }),
+        this.prisma.contact.groupBy({
+          by: ['strategyCode'],
+          where: { deletedAt: null },
+          _count: true,
+        }),
+        this.prisma.contact.groupBy({
+          by: ['outreachEligible'],
+          where: { deletedAt: null },
+          _count: true,
+        }),
+        this.prisma.contact.groupBy({
+          by: ['skipReason'],
+          where: { deletedAt: null },
+          _count: true,
+        }),
       ]);
 
     return {
@@ -143,7 +167,7 @@ export class ClassificationService {
       contact.skipReason === OutreachSkipReason.MISSING_PHONE;
 
     return this.prisma.contact.update({
-      where: { id: contact.id },
+      where: { id: contact.id, deletedAt: null },
       data: {
         crmProvider,
         businessType,

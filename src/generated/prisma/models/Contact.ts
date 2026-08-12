@@ -46,6 +46,9 @@ export type ContactMinAggregateOutputType = {
   status: $Enums.ContactStatus | null
   createdAt: Date | null
   updatedAt: Date | null
+  deletedAt: Date | null
+  deletedBy: string | null
+  deletionReason: string | null
 }
 
 export type ContactMaxAggregateOutputType = {
@@ -70,6 +73,9 @@ export type ContactMaxAggregateOutputType = {
   status: $Enums.ContactStatus | null
   createdAt: Date | null
   updatedAt: Date | null
+  deletedAt: Date | null
+  deletedBy: string | null
+  deletionReason: string | null
 }
 
 export type ContactCountAggregateOutputType = {
@@ -96,6 +102,9 @@ export type ContactCountAggregateOutputType = {
   status: number
   createdAt: number
   updatedAt: number
+  deletedAt: number
+  deletedBy: number
+  deletionReason: number
   _all: number
 }
 
@@ -122,6 +131,9 @@ export type ContactMinAggregateInputType = {
   status?: true
   createdAt?: true
   updatedAt?: true
+  deletedAt?: true
+  deletedBy?: true
+  deletionReason?: true
 }
 
 export type ContactMaxAggregateInputType = {
@@ -146,6 +158,9 @@ export type ContactMaxAggregateInputType = {
   status?: true
   createdAt?: true
   updatedAt?: true
+  deletedAt?: true
+  deletedBy?: true
+  deletionReason?: true
 }
 
 export type ContactCountAggregateInputType = {
@@ -172,6 +187,9 @@ export type ContactCountAggregateInputType = {
   status?: true
   createdAt?: true
   updatedAt?: true
+  deletedAt?: true
+  deletedBy?: true
+  deletionReason?: true
   _all?: true
 }
 
@@ -271,6 +289,9 @@ export type ContactGroupByOutputType = {
   status: $Enums.ContactStatus
   createdAt: Date
   updatedAt: Date
+  deletedAt: Date | null
+  deletedBy: string | null
+  deletionReason: string | null
   _count: ContactCountAggregateOutputType | null
   _min: ContactMinAggregateOutputType | null
   _max: ContactMaxAggregateOutputType | null
@@ -318,6 +339,9 @@ export type ContactWhereInput = {
   status?: Prisma.EnumContactStatusFilter<"Contact"> | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFilter<"Contact"> | Date | string
   updatedAt?: Prisma.DateTimeFilter<"Contact"> | Date | string
+  deletedAt?: Prisma.DateTimeNullableFilter<"Contact"> | Date | string | null
+  deletedBy?: Prisma.StringNullableFilter<"Contact"> | string | null
+  deletionReason?: Prisma.StringNullableFilter<"Contact"> | string | null
   conversations?: Prisma.ConversationListRelationFilter
   leads?: Prisma.LeadListRelationFilter
   campaignTargets?: Prisma.CampaignTargetListRelationFilter
@@ -349,6 +373,9 @@ export type ContactOrderByWithRelationInput = {
   status?: Prisma.SortOrder
   createdAt?: Prisma.SortOrder
   updatedAt?: Prisma.SortOrder
+  deletedAt?: Prisma.SortOrderInput | Prisma.SortOrder
+  deletedBy?: Prisma.SortOrderInput | Prisma.SortOrder
+  deletionReason?: Prisma.SortOrderInput | Prisma.SortOrder
   conversations?: Prisma.ConversationOrderByRelationAggregateInput
   leads?: Prisma.LeadOrderByRelationAggregateInput
   campaignTargets?: Prisma.CampaignTargetOrderByRelationAggregateInput
@@ -358,11 +385,11 @@ export type ContactOrderByWithRelationInput = {
 
 export type ContactWhereUniqueInput = Prisma.AtLeast<{
   id?: string
-  phone?: string
   AND?: Prisma.ContactWhereInput | Prisma.ContactWhereInput[]
   OR?: Prisma.ContactWhereInput[]
   NOT?: Prisma.ContactWhereInput | Prisma.ContactWhereInput[]
   companyName?: Prisma.StringFilter<"Contact"> | string
+  phone?: Prisma.StringFilter<"Contact"> | string
   city?: Prisma.StringNullableFilter<"Contact"> | string | null
   category?: Prisma.StringNullableFilter<"Contact"> | string | null
   website?: Prisma.StringNullableFilter<"Contact"> | string | null
@@ -383,12 +410,15 @@ export type ContactWhereUniqueInput = Prisma.AtLeast<{
   status?: Prisma.EnumContactStatusFilter<"Contact"> | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFilter<"Contact"> | Date | string
   updatedAt?: Prisma.DateTimeFilter<"Contact"> | Date | string
+  deletedAt?: Prisma.DateTimeNullableFilter<"Contact"> | Date | string | null
+  deletedBy?: Prisma.StringNullableFilter<"Contact"> | string | null
+  deletionReason?: Prisma.StringNullableFilter<"Contact"> | string | null
   conversations?: Prisma.ConversationListRelationFilter
   leads?: Prisma.LeadListRelationFilter
   campaignTargets?: Prisma.CampaignTargetListRelationFilter
   whatsappMessages?: Prisma.WhatsAppMessageListRelationFilter
   mediaAttachments?: Prisma.MediaAttachmentListRelationFilter
-}, "id" | "phone">
+}, "id">
 
 export type ContactOrderByWithAggregationInput = {
   id?: Prisma.SortOrder
@@ -414,6 +444,9 @@ export type ContactOrderByWithAggregationInput = {
   status?: Prisma.SortOrder
   createdAt?: Prisma.SortOrder
   updatedAt?: Prisma.SortOrder
+  deletedAt?: Prisma.SortOrderInput | Prisma.SortOrder
+  deletedBy?: Prisma.SortOrderInput | Prisma.SortOrder
+  deletionReason?: Prisma.SortOrderInput | Prisma.SortOrder
   _count?: Prisma.ContactCountOrderByAggregateInput
   _max?: Prisma.ContactMaxOrderByAggregateInput
   _min?: Prisma.ContactMinOrderByAggregateInput
@@ -446,6 +479,9 @@ export type ContactScalarWhereWithAggregatesInput = {
   status?: Prisma.EnumContactStatusWithAggregatesFilter<"Contact"> | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeWithAggregatesFilter<"Contact"> | Date | string
   updatedAt?: Prisma.DateTimeWithAggregatesFilter<"Contact"> | Date | string
+  deletedAt?: Prisma.DateTimeNullableWithAggregatesFilter<"Contact"> | Date | string | null
+  deletedBy?: Prisma.StringNullableWithAggregatesFilter<"Contact"> | string | null
+  deletionReason?: Prisma.StringNullableWithAggregatesFilter<"Contact"> | string | null
 }
 
 export type ContactCreateInput = {
@@ -472,6 +508,9 @@ export type ContactCreateInput = {
   status?: $Enums.ContactStatus
   createdAt?: Date | string
   updatedAt?: Date | string
+  deletedAt?: Date | string | null
+  deletedBy?: string | null
+  deletionReason?: string | null
   conversations?: Prisma.ConversationCreateNestedManyWithoutContactInput
   leads?: Prisma.LeadCreateNestedManyWithoutContactInput
   campaignTargets?: Prisma.CampaignTargetCreateNestedManyWithoutContactInput
@@ -503,6 +542,9 @@ export type ContactUncheckedCreateInput = {
   status?: $Enums.ContactStatus
   createdAt?: Date | string
   updatedAt?: Date | string
+  deletedAt?: Date | string | null
+  deletedBy?: string | null
+  deletionReason?: string | null
   conversations?: Prisma.ConversationUncheckedCreateNestedManyWithoutContactInput
   leads?: Prisma.LeadUncheckedCreateNestedManyWithoutContactInput
   campaignTargets?: Prisma.CampaignTargetUncheckedCreateNestedManyWithoutContactInput
@@ -534,6 +576,9 @@ export type ContactUpdateInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   conversations?: Prisma.ConversationUpdateManyWithoutContactNestedInput
   leads?: Prisma.LeadUpdateManyWithoutContactNestedInput
   campaignTargets?: Prisma.CampaignTargetUpdateManyWithoutContactNestedInput
@@ -565,6 +610,9 @@ export type ContactUncheckedUpdateInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   conversations?: Prisma.ConversationUncheckedUpdateManyWithoutContactNestedInput
   leads?: Prisma.LeadUncheckedUpdateManyWithoutContactNestedInput
   campaignTargets?: Prisma.CampaignTargetUncheckedUpdateManyWithoutContactNestedInput
@@ -596,6 +644,9 @@ export type ContactCreateManyInput = {
   status?: $Enums.ContactStatus
   createdAt?: Date | string
   updatedAt?: Date | string
+  deletedAt?: Date | string | null
+  deletedBy?: string | null
+  deletionReason?: string | null
 }
 
 export type ContactUpdateManyMutationInput = {
@@ -622,6 +673,9 @@ export type ContactUpdateManyMutationInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
 }
 
 export type ContactUncheckedUpdateManyInput = {
@@ -648,6 +702,9 @@ export type ContactUncheckedUpdateManyInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
 }
 
 export type ContactCountOrderByAggregateInput = {
@@ -674,6 +731,9 @@ export type ContactCountOrderByAggregateInput = {
   status?: Prisma.SortOrder
   createdAt?: Prisma.SortOrder
   updatedAt?: Prisma.SortOrder
+  deletedAt?: Prisma.SortOrder
+  deletedBy?: Prisma.SortOrder
+  deletionReason?: Prisma.SortOrder
 }
 
 export type ContactMaxOrderByAggregateInput = {
@@ -698,6 +758,9 @@ export type ContactMaxOrderByAggregateInput = {
   status?: Prisma.SortOrder
   createdAt?: Prisma.SortOrder
   updatedAt?: Prisma.SortOrder
+  deletedAt?: Prisma.SortOrder
+  deletedBy?: Prisma.SortOrder
+  deletionReason?: Prisma.SortOrder
 }
 
 export type ContactMinOrderByAggregateInput = {
@@ -722,6 +785,9 @@ export type ContactMinOrderByAggregateInput = {
   status?: Prisma.SortOrder
   createdAt?: Prisma.SortOrder
   updatedAt?: Prisma.SortOrder
+  deletedAt?: Prisma.SortOrder
+  deletedBy?: Prisma.SortOrder
+  deletionReason?: Prisma.SortOrder
 }
 
 export type ContactScalarRelationFilter = {
@@ -734,14 +800,6 @@ export type ContactNullableScalarRelationFilter = {
   isNot?: Prisma.ContactWhereInput | null
 }
 
-export type StringFieldUpdateOperationsInput = {
-  set?: string
-}
-
-export type NullableStringFieldUpdateOperationsInput = {
-  set?: string | null
-}
-
 export type EnumCrmProviderFieldUpdateOperationsInput = {
   set?: $Enums.CrmProvider
 }
@@ -750,24 +808,12 @@ export type EnumBusinessTypeFieldUpdateOperationsInput = {
   set?: $Enums.BusinessType
 }
 
-export type BoolFieldUpdateOperationsInput = {
-  set?: boolean
-}
-
 export type NullableEnumOutreachSkipReasonFieldUpdateOperationsInput = {
   set?: $Enums.OutreachSkipReason | null
 }
 
-export type NullableDateTimeFieldUpdateOperationsInput = {
-  set?: Date | string | null
-}
-
 export type EnumContactStatusFieldUpdateOperationsInput = {
   set?: $Enums.ContactStatus
-}
-
-export type DateTimeFieldUpdateOperationsInput = {
-  set?: Date | string
 }
 
 export type ContactCreateNestedOneWithoutConversationsInput = {
@@ -868,6 +914,9 @@ export type ContactCreateWithoutConversationsInput = {
   status?: $Enums.ContactStatus
   createdAt?: Date | string
   updatedAt?: Date | string
+  deletedAt?: Date | string | null
+  deletedBy?: string | null
+  deletionReason?: string | null
   leads?: Prisma.LeadCreateNestedManyWithoutContactInput
   campaignTargets?: Prisma.CampaignTargetCreateNestedManyWithoutContactInput
   whatsappMessages?: Prisma.WhatsAppMessageCreateNestedManyWithoutContactInput
@@ -898,6 +947,9 @@ export type ContactUncheckedCreateWithoutConversationsInput = {
   status?: $Enums.ContactStatus
   createdAt?: Date | string
   updatedAt?: Date | string
+  deletedAt?: Date | string | null
+  deletedBy?: string | null
+  deletionReason?: string | null
   leads?: Prisma.LeadUncheckedCreateNestedManyWithoutContactInput
   campaignTargets?: Prisma.CampaignTargetUncheckedCreateNestedManyWithoutContactInput
   whatsappMessages?: Prisma.WhatsAppMessageUncheckedCreateNestedManyWithoutContactInput
@@ -944,6 +996,9 @@ export type ContactUpdateWithoutConversationsInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   leads?: Prisma.LeadUpdateManyWithoutContactNestedInput
   campaignTargets?: Prisma.CampaignTargetUpdateManyWithoutContactNestedInput
   whatsappMessages?: Prisma.WhatsAppMessageUpdateManyWithoutContactNestedInput
@@ -974,6 +1029,9 @@ export type ContactUncheckedUpdateWithoutConversationsInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   leads?: Prisma.LeadUncheckedUpdateManyWithoutContactNestedInput
   campaignTargets?: Prisma.CampaignTargetUncheckedUpdateManyWithoutContactNestedInput
   whatsappMessages?: Prisma.WhatsAppMessageUncheckedUpdateManyWithoutContactNestedInput
@@ -1004,6 +1062,9 @@ export type ContactCreateWithoutLeadsInput = {
   status?: $Enums.ContactStatus
   createdAt?: Date | string
   updatedAt?: Date | string
+  deletedAt?: Date | string | null
+  deletedBy?: string | null
+  deletionReason?: string | null
   conversations?: Prisma.ConversationCreateNestedManyWithoutContactInput
   campaignTargets?: Prisma.CampaignTargetCreateNestedManyWithoutContactInput
   whatsappMessages?: Prisma.WhatsAppMessageCreateNestedManyWithoutContactInput
@@ -1034,6 +1095,9 @@ export type ContactUncheckedCreateWithoutLeadsInput = {
   status?: $Enums.ContactStatus
   createdAt?: Date | string
   updatedAt?: Date | string
+  deletedAt?: Date | string | null
+  deletedBy?: string | null
+  deletionReason?: string | null
   conversations?: Prisma.ConversationUncheckedCreateNestedManyWithoutContactInput
   campaignTargets?: Prisma.CampaignTargetUncheckedCreateNestedManyWithoutContactInput
   whatsappMessages?: Prisma.WhatsAppMessageUncheckedCreateNestedManyWithoutContactInput
@@ -1080,6 +1144,9 @@ export type ContactUpdateWithoutLeadsInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   conversations?: Prisma.ConversationUpdateManyWithoutContactNestedInput
   campaignTargets?: Prisma.CampaignTargetUpdateManyWithoutContactNestedInput
   whatsappMessages?: Prisma.WhatsAppMessageUpdateManyWithoutContactNestedInput
@@ -1110,6 +1177,9 @@ export type ContactUncheckedUpdateWithoutLeadsInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   conversations?: Prisma.ConversationUncheckedUpdateManyWithoutContactNestedInput
   campaignTargets?: Prisma.CampaignTargetUncheckedUpdateManyWithoutContactNestedInput
   whatsappMessages?: Prisma.WhatsAppMessageUncheckedUpdateManyWithoutContactNestedInput
@@ -1140,6 +1210,9 @@ export type ContactCreateWithoutCampaignTargetsInput = {
   status?: $Enums.ContactStatus
   createdAt?: Date | string
   updatedAt?: Date | string
+  deletedAt?: Date | string | null
+  deletedBy?: string | null
+  deletionReason?: string | null
   conversations?: Prisma.ConversationCreateNestedManyWithoutContactInput
   leads?: Prisma.LeadCreateNestedManyWithoutContactInput
   whatsappMessages?: Prisma.WhatsAppMessageCreateNestedManyWithoutContactInput
@@ -1170,6 +1243,9 @@ export type ContactUncheckedCreateWithoutCampaignTargetsInput = {
   status?: $Enums.ContactStatus
   createdAt?: Date | string
   updatedAt?: Date | string
+  deletedAt?: Date | string | null
+  deletedBy?: string | null
+  deletionReason?: string | null
   conversations?: Prisma.ConversationUncheckedCreateNestedManyWithoutContactInput
   leads?: Prisma.LeadUncheckedCreateNestedManyWithoutContactInput
   whatsappMessages?: Prisma.WhatsAppMessageUncheckedCreateNestedManyWithoutContactInput
@@ -1216,6 +1292,9 @@ export type ContactUpdateWithoutCampaignTargetsInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   conversations?: Prisma.ConversationUpdateManyWithoutContactNestedInput
   leads?: Prisma.LeadUpdateManyWithoutContactNestedInput
   whatsappMessages?: Prisma.WhatsAppMessageUpdateManyWithoutContactNestedInput
@@ -1246,6 +1325,9 @@ export type ContactUncheckedUpdateWithoutCampaignTargetsInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   conversations?: Prisma.ConversationUncheckedUpdateManyWithoutContactNestedInput
   leads?: Prisma.LeadUncheckedUpdateManyWithoutContactNestedInput
   whatsappMessages?: Prisma.WhatsAppMessageUncheckedUpdateManyWithoutContactNestedInput
@@ -1276,6 +1358,9 @@ export type ContactCreateWithoutWhatsappMessagesInput = {
   status?: $Enums.ContactStatus
   createdAt?: Date | string
   updatedAt?: Date | string
+  deletedAt?: Date | string | null
+  deletedBy?: string | null
+  deletionReason?: string | null
   conversations?: Prisma.ConversationCreateNestedManyWithoutContactInput
   leads?: Prisma.LeadCreateNestedManyWithoutContactInput
   campaignTargets?: Prisma.CampaignTargetCreateNestedManyWithoutContactInput
@@ -1306,6 +1391,9 @@ export type ContactUncheckedCreateWithoutWhatsappMessagesInput = {
   status?: $Enums.ContactStatus
   createdAt?: Date | string
   updatedAt?: Date | string
+  deletedAt?: Date | string | null
+  deletedBy?: string | null
+  deletionReason?: string | null
   conversations?: Prisma.ConversationUncheckedCreateNestedManyWithoutContactInput
   leads?: Prisma.LeadUncheckedCreateNestedManyWithoutContactInput
   campaignTargets?: Prisma.CampaignTargetUncheckedCreateNestedManyWithoutContactInput
@@ -1352,6 +1440,9 @@ export type ContactUpdateWithoutWhatsappMessagesInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   conversations?: Prisma.ConversationUpdateManyWithoutContactNestedInput
   leads?: Prisma.LeadUpdateManyWithoutContactNestedInput
   campaignTargets?: Prisma.CampaignTargetUpdateManyWithoutContactNestedInput
@@ -1382,6 +1473,9 @@ export type ContactUncheckedUpdateWithoutWhatsappMessagesInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   conversations?: Prisma.ConversationUncheckedUpdateManyWithoutContactNestedInput
   leads?: Prisma.LeadUncheckedUpdateManyWithoutContactNestedInput
   campaignTargets?: Prisma.CampaignTargetUncheckedUpdateManyWithoutContactNestedInput
@@ -1412,6 +1506,9 @@ export type ContactCreateWithoutMediaAttachmentsInput = {
   status?: $Enums.ContactStatus
   createdAt?: Date | string
   updatedAt?: Date | string
+  deletedAt?: Date | string | null
+  deletedBy?: string | null
+  deletionReason?: string | null
   conversations?: Prisma.ConversationCreateNestedManyWithoutContactInput
   leads?: Prisma.LeadCreateNestedManyWithoutContactInput
   campaignTargets?: Prisma.CampaignTargetCreateNestedManyWithoutContactInput
@@ -1442,6 +1539,9 @@ export type ContactUncheckedCreateWithoutMediaAttachmentsInput = {
   status?: $Enums.ContactStatus
   createdAt?: Date | string
   updatedAt?: Date | string
+  deletedAt?: Date | string | null
+  deletedBy?: string | null
+  deletionReason?: string | null
   conversations?: Prisma.ConversationUncheckedCreateNestedManyWithoutContactInput
   leads?: Prisma.LeadUncheckedCreateNestedManyWithoutContactInput
   campaignTargets?: Prisma.CampaignTargetUncheckedCreateNestedManyWithoutContactInput
@@ -1488,6 +1588,9 @@ export type ContactUpdateWithoutMediaAttachmentsInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   conversations?: Prisma.ConversationUpdateManyWithoutContactNestedInput
   leads?: Prisma.LeadUpdateManyWithoutContactNestedInput
   campaignTargets?: Prisma.CampaignTargetUpdateManyWithoutContactNestedInput
@@ -1518,6 +1621,9 @@ export type ContactUncheckedUpdateWithoutMediaAttachmentsInput = {
   status?: Prisma.EnumContactStatusFieldUpdateOperationsInput | $Enums.ContactStatus
   createdAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
   updatedAt?: Prisma.DateTimeFieldUpdateOperationsInput | Date | string
+  deletedAt?: Prisma.NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+  deletedBy?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
+  deletionReason?: Prisma.NullableStringFieldUpdateOperationsInput | string | null
   conversations?: Prisma.ConversationUncheckedUpdateManyWithoutContactNestedInput
   leads?: Prisma.LeadUncheckedUpdateManyWithoutContactNestedInput
   campaignTargets?: Prisma.CampaignTargetUncheckedUpdateManyWithoutContactNestedInput
@@ -1615,6 +1721,9 @@ export type ContactSelect<ExtArgs extends runtime.Types.Extensions.InternalArgs 
   status?: boolean
   createdAt?: boolean
   updatedAt?: boolean
+  deletedAt?: boolean
+  deletedBy?: boolean
+  deletionReason?: boolean
   conversations?: boolean | Prisma.Contact$conversationsArgs<ExtArgs>
   leads?: boolean | Prisma.Contact$leadsArgs<ExtArgs>
   campaignTargets?: boolean | Prisma.Contact$campaignTargetsArgs<ExtArgs>
@@ -1647,6 +1756,9 @@ export type ContactSelectCreateManyAndReturn<ExtArgs extends runtime.Types.Exten
   status?: boolean
   createdAt?: boolean
   updatedAt?: boolean
+  deletedAt?: boolean
+  deletedBy?: boolean
+  deletionReason?: boolean
 }, ExtArgs["result"]["contact"]>
 
 export type ContactSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetSelect<{
@@ -1673,6 +1785,9 @@ export type ContactSelectUpdateManyAndReturn<ExtArgs extends runtime.Types.Exten
   status?: boolean
   createdAt?: boolean
   updatedAt?: boolean
+  deletedAt?: boolean
+  deletedBy?: boolean
+  deletionReason?: boolean
 }, ExtArgs["result"]["contact"]>
 
 export type ContactSelectScalar = {
@@ -1699,9 +1814,12 @@ export type ContactSelectScalar = {
   status?: boolean
   createdAt?: boolean
   updatedAt?: boolean
+  deletedAt?: boolean
+  deletedBy?: boolean
+  deletionReason?: boolean
 }
 
-export type ContactOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "companyName" | "phone" | "city" | "category" | "website" | "instagram" | "twoGisUrl" | "bookingUrl" | "email" | "address" | "notes" | "rawData" | "crmProvider" | "businessType" | "strategyCode" | "outreachEligible" | "skipReason" | "detectedDomains" | "classifiedAt" | "status" | "createdAt" | "updatedAt", ExtArgs["result"]["contact"]>
+export type ContactOmit<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = runtime.Types.Extensions.GetOmit<"id" | "companyName" | "phone" | "city" | "category" | "website" | "instagram" | "twoGisUrl" | "bookingUrl" | "email" | "address" | "notes" | "rawData" | "crmProvider" | "businessType" | "strategyCode" | "outreachEligible" | "skipReason" | "detectedDomains" | "classifiedAt" | "status" | "createdAt" | "updatedAt" | "deletedAt" | "deletedBy" | "deletionReason", ExtArgs["result"]["contact"]>
 export type ContactInclude<ExtArgs extends runtime.Types.Extensions.InternalArgs = runtime.Types.Extensions.DefaultArgs> = {
   conversations?: boolean | Prisma.Contact$conversationsArgs<ExtArgs>
   leads?: boolean | Prisma.Contact$leadsArgs<ExtArgs>
@@ -1746,6 +1864,9 @@ export type $ContactPayload<ExtArgs extends runtime.Types.Extensions.InternalArg
     status: $Enums.ContactStatus
     createdAt: Date
     updatedAt: Date
+    deletedAt: Date | null
+    deletedBy: string | null
+    deletionReason: string | null
   }, ExtArgs["result"]["contact"]>
   composites: {}
 }
@@ -2197,6 +2318,9 @@ export interface ContactFieldRefs {
   readonly status: Prisma.FieldRef<"Contact", 'ContactStatus'>
   readonly createdAt: Prisma.FieldRef<"Contact", 'DateTime'>
   readonly updatedAt: Prisma.FieldRef<"Contact", 'DateTime'>
+  readonly deletedAt: Prisma.FieldRef<"Contact", 'DateTime'>
+  readonly deletedBy: Prisma.FieldRef<"Contact", 'String'>
+  readonly deletionReason: Prisma.FieldRef<"Contact", 'String'>
 }
     
 

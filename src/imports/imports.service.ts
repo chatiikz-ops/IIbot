@@ -10,10 +10,14 @@ import { ClassificationService } from '../classification/classification.service'
 import { ImportRowStatus, ImportStatus } from '../generated/prisma/enums';
 import { Prisma } from '../generated/prisma/client';
 import { normalizePhone } from '../common/utils/phone.util';
+import {
+  normalizeHttpUrl,
+  normalizeInstagram,
+  normalizedEmail,
+} from '../common/utils/contact-normalization.util';
 import { PrismaService } from '../prisma/prisma.service';
 import type { ImportRowsQueryDto } from './dto/import-rows-query.dto';
 import {
-  IMPORT_FIELDS,
   MAPPING_FIELDS,
   type ColumnMapping,
   type ImportField,
@@ -211,7 +215,7 @@ export class ImportsService {
           }));
           const phones = normalizedRows.map(({ data }) => data.phone);
           const existing = await tx.contact.findMany({
-            where: { phone: { in: phones } },
+            where: { phone: { in: phones }, deletedAt: null },
             select: { phone: true },
           });
           const existingPhones = new Set(existing.map(({ phone }) => phone));
@@ -314,7 +318,7 @@ export class ImportsService {
 
     for (const batch of this.chunk([...new Set(phones)], 5_000)) {
       const contacts = await this.prisma.contact.findMany({
-        where: { phone: { in: batch } },
+        where: { phone: { in: batch }, deletedAt: null },
         select: { phone: true },
       });
       contacts.forEach(({ phone }) => existingPhones.add(phone));
@@ -372,7 +376,7 @@ export class ImportsService {
             instagram,
             twoGisUrl,
             bookingUrl,
-            email: mapped.email ?? null,
+            email: normalizedEmail(mapped.email) as string | null,
             address: mapped.address ?? null,
             notes: mapped.notes ?? null,
           }
@@ -387,15 +391,12 @@ export class ImportsService {
     errors: string[],
   ): string | null {
     if (!value) return null;
-    const candidate = /^https?:\/\//i.test(value) ? value : `https://${value}`;
-    try {
-      const url = new URL(candidate);
-      if (!url.hostname.includes('.')) throw new Error();
-      return url.toString();
-    } catch {
+    const url = normalizeHttpUrl(value);
+    if (!url) {
       errors.push(`Некорректный URL в поле ${field}`);
       return null;
     }
+    return url;
   }
 
   private normalizeInstagram(
@@ -403,13 +404,9 @@ export class ImportsService {
     errors: string[],
   ) {
     if (!value) return null;
-    if (value.startsWith('@')) {
-      const handle = value.slice(1).trim();
-      if (/^[a-zA-Z0-9._]+$/.test(handle)) {
-        return `https://instagram.com/${handle}`;
-      }
-    }
-    return this.normalizeUrl(value, 'instagram', errors);
+    const instagram = normalizeInstagram(value);
+    if (!instagram) errors.push('Некорректная ссылка Instagram');
+    return instagram;
   }
 
   private validateMapping(input: Record<string, string>, headers: string[]) {

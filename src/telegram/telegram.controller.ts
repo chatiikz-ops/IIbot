@@ -18,6 +18,8 @@ import { TelegramConfigService } from './telegram-config.service';
 import { TelegramNotificationsService } from './telegram-notifications.service';
 import { TelegramRecipientsService } from './telegram-recipients.service';
 import { TelegramSettingsService } from './telegram-settings.service';
+import { Roles } from '../auth/auth.decorators';
+import { AdminRole } from '../generated/prisma/enums';
 
 @Controller('telegram')
 export class TelegramController {
@@ -51,6 +53,7 @@ export class TelegramController {
       ),
     };
   }
+  @Roles(AdminRole.OWNER)
   @Post('recipients') create(@Body() data: CreateTelegramRecipientDto) {
     return this.recipients.create(data);
   }
@@ -60,11 +63,13 @@ export class TelegramController {
   @Get('recipients/:id') recipient(@Param('id', ParseUUIDPipe) id: string) {
     return this.recipients.findOne(id);
   }
+  @Roles(AdminRole.OWNER)
   @Post('recipients/:id/reconnect') reconnect(
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.recipients.reconnect(id);
   }
+  @Roles(AdminRole.OWNER)
   @Post('recipients/:id/disable') disable(
     @Param('id', ParseUUIDPipe) id: string,
   ) {
@@ -76,6 +81,7 @@ export class TelegramController {
   @Get('settings') getSettings() {
     return this.settings.get();
   }
+  @Roles(AdminRole.OWNER)
   @Patch('settings') updateSettings(@Body() data: UpdateTelegramSettingsDto) {
     return this.settings.update(data);
   }

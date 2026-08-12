@@ -27,6 +27,12 @@
 
 ## Project setup
 
+## Аутентификация админки
+
+Сгенерируйте длинный случайный `JWT_ACCESS_SECRET`, заполните auth-переменные из `.env.example` и примените миграции командой `npx prisma migrate deploy`.
+
+Первый владелец создаётся только CLI-командой `npm run admin:create-owner` с переменными `ADMIN_BOOTSTRAP_EMAIL`, `ADMIN_BOOTSTRAP_NAME` и `ADMIN_BOOTSTRAP_PASSWORD`. Команда работает только при пустой таблице пользователей. Публичной регистрации нет; реальные пароли и секреты нельзя коммитить или выводить в логи.
+
 ```bash
 $ npm install
 ```

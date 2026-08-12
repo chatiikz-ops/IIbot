@@ -14,6 +14,8 @@ import { AutomationSettingsService } from './automation-settings.service';
 import { ConversationOrchestratorService } from './conversation-orchestrator.service';
 import { AutomationEventsQueryDto } from './dto/automation-events-query.dto';
 import { UpdateAutomationSettingsDto } from './dto/update-automation-settings.dto';
+import { Roles } from '../auth/auth.decorators';
+import { AdminRole } from '../generated/prisma/enums';
 
 @Controller('automation')
 export class AutomationController {
@@ -28,6 +30,7 @@ export class AutomationController {
     return this.settings.get();
   }
 
+  @Roles(AdminRole.OWNER)
   @Patch('settings')
   updateSettings(@Body() data: UpdateAutomationSettingsDto) {
     return this.settings.update(data);
