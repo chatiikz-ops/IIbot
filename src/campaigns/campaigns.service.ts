@@ -320,6 +320,12 @@ export class CampaignsService {
     return target;
   }
 
+  findTargetByConversationId(conversationId: string) {
+    return this.prisma.campaignTarget.findUnique({
+      where: { conversationId },
+    });
+  }
+
   attachConversation(targetId: string, conversationId: string) {
     return this.prisma.campaignTarget.update({
       where: { id: targetId },
@@ -392,7 +398,8 @@ export class CampaignsService {
           ...(data.status === CampaignTargetStatus.PROCESSING
             ? { processingStartedAt: now }
             : {}),
-          ...(data.status === CampaignTargetStatus.MESSAGE_SENT
+          ...(data.status === CampaignTargetStatus.MESSAGE_SENT ||
+          data.status === CampaignTargetStatus.WAITING_REPLY
             ? { messageSentAt: now }
             : {}),
           ...(REPLIED_TARGET_STATUSES.has(data.status)
@@ -533,7 +540,10 @@ export class CampaignsService {
     minDelaySeconds: number;
     maxDelaySeconds: number;
   }) {
-    if (settings.workingHoursStart >= settings.workingHoursEnd) {
+    if (
+      !/^([01]\d|2[0-3]):[0-5]\d$/.test(settings.workingHoursStart) ||
+      !/^([01]\d|2[0-3]):[0-5]\d$/.test(settings.workingHoursEnd)
+    ) {
       throw new BadRequestException(
         'Начало рабочего времени должно быть раньше окончания',
       );

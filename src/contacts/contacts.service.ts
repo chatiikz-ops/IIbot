@@ -46,10 +46,25 @@ export class ContactsService {
   }
 
   async findAll(query: ContactsQueryDto) {
-    const { page, limit, search, status } = query;
+    const {
+      page,
+      limit,
+      search,
+      status,
+      crmProvider,
+      businessType,
+      outreachEligible,
+      strategyCode,
+      city,
+    } = query;
     const where: Prisma.ContactWhereInput = {
       deletedAt: null,
       status,
+      crmProvider,
+      businessType,
+      outreachEligible,
+      strategyCode,
+      ...(city ? { city: { equals: city, mode: 'insensitive' } } : {}),
       ...(search
         ? {
             OR: [

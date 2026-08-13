@@ -21,6 +21,8 @@ import { PromptStrategiesModule } from './prompt-strategies/prompt-strategies.mo
 import { WhatsAppModule } from './whatsapp/whatsapp.module';
 import { TelegramModule } from './telegram/telegram.module';
 import { AutomationModule } from './automation/automation.module';
+import { HealthModule } from './health/health.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 
 @Module({
   imports: [
@@ -41,8 +43,15 @@ import { AutomationModule } from './automation/automation.module';
     WhatsAppModule,
     TelegramModule,
     AutomationModule,
+    HealthModule,
+    DashboardModule,
   ],
   controllers: [AppController],
-  providers: [AppService,{provide:APP_GUARD,useClass:ThrottlerGuard},{provide:APP_GUARD,useClass:AuthGuard},{provide:APP_GUARD,useClass:RolesGuard}],
+  providers: [
+    AppService,
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: AuthGuard },
+    { provide: APP_GUARD, useClass: RolesGuard },
+  ],
 })
 export class AppModule {}

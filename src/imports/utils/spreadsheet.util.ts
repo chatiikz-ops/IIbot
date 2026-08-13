@@ -5,6 +5,8 @@ import * as XLSX from 'xlsx';
 const SUPPORTED_EXTENSIONS = new Set(['.xlsx', '.xls', '.csv']);
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const MAX_ROWS = 20_000;
+const MAX_SHEETS = 10;
+const MAX_CELLS = 500_000;
 
 export function parseSpreadsheet(file?: Express.Multer.File) {
   if (!file) {
@@ -20,6 +22,12 @@ export function parseSpreadsheet(file?: Express.Multer.File) {
     throw new BadRequestException('Размер файла превышает 10 МБ');
   }
 
+  if (!hasExpectedSignature(extension, file.buffer)) {
+    throw new BadRequestException(
+      'Содержимое файла не соответствует его формату',
+    );
+  }
+
   let workbook: XLSX.WorkBook;
   try {
     workbook = XLSX.read(file.buffer, { type: 'buffer', raw: false });
@@ -27,9 +35,22 @@ export function parseSpreadsheet(file?: Express.Multer.File) {
     throw new BadRequestException('Некорректный формат файла');
   }
 
+  if (workbook.SheetNames.length > MAX_SHEETS) {
+    throw new BadRequestException('Файл содержит слишком много листов');
+  }
+
   const firstSheetName = workbook.SheetNames[0];
   if (!firstSheetName) {
     throw new BadRequestException('Файл не содержит данных');
+  }
+  const range = workbook.Sheets[firstSheetName]['!ref'];
+  if (range) {
+    const decoded = XLSX.utils.decode_range(range);
+    const cells =
+      (decoded.e.r - decoded.s.r + 1) * (decoded.e.c - decoded.s.c + 1);
+    if (cells > MAX_CELLS) {
+      throw new BadRequestException('Файл содержит слишком много ячеек');
+    }
   }
 
   const matrix = XLSX.utils.sheet_to_json<unknown[]>(
@@ -75,6 +96,23 @@ export function parseSpreadsheet(file?: Express.Multer.File) {
   }
 
   return { headers, rows };
+}
+
+function hasExpectedSignature(extension: string, buffer: Buffer) {
+  if (extension === '.xlsx') {
+    return (
+      buffer.length >= 4 &&
+      buffer[0] === 0x50 &&
+      buffer[1] === 0x4b &&
+      buffer[2] === 0x03 &&
+      buffer[3] === 0x04
+    );
+  }
+  if (extension === '.xls') {
+    const signature = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+    return signature.every((byte, index) => buffer[index] === byte);
+  }
+  return !buffer.subarray(0, Math.min(buffer.length, 4096)).includes(0);
 }
 
 function makeUniqueHeaders(values: unknown[]): string[] {

@@ -38,6 +38,8 @@ model AdminSession {
   userId            String
   refreshTokenHash  String
   previousTokenHash String?
+  previousTokenValidUntil DateTime?
+  rotationVersion   Int       @default(0)
   userAgent         String?
   ipAddress         String?
   createdAt         DateTime  @default(now())
@@ -48,6 +50,46 @@ model AdminSession {
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+enum AutomationJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum AutomationJobType {
+  CONVERSATION_REPLY
+  CAMPAIGN_TARGET
+}
+
+model AutomationJob {
+  id               String              @id @default(uuid())
+  type             AutomationJobType
+  status           AutomationJobStatus @default(PENDING)
+  runAt            DateTime
+  contactId        String?
+  conversationId   String?
+  campaignId       String?
+  campaignTargetId String?
+  messageId        String?
+  payload           Json?
+  deduplicationKey String?              @unique
+  attempts         Int                 @default(0)
+  maxAttempts      Int                 @default(3)
+  lockedAt         DateTime?
+  lockedBy         String?
+  lastError        String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  completedAt      DateTime?
+
+  @@index([status, runAt])
+  @@index([status, lockedAt])
+  @@index([campaignId, status])
+  @@index([campaignTargetId])
 }
 
 enum ContactStatus {
@@ -300,6 +342,12 @@ model Contact {
   mediaAttachments MediaAttachment[]
 
   @@index([deletedAt])
+  @@index([deletedAt, status])
+  @@index([deletedAt, crmProvider])
+  @@index([deletedAt, businessType])
+  @@index([deletedAt, outreachEligible])
+  @@index([deletedAt, strategyCode])
+  @@index([deletedAt, city])
 }
 
 model ImportJob {

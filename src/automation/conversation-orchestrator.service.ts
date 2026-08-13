@@ -41,6 +41,7 @@ const STARTABLE_TARGET_STATUSES: CampaignTargetStatus[] = [
   CampaignTargetStatus.WAITING,
   CampaignTargetStatus.READY,
   CampaignTargetStatus.ERROR,
+  CampaignTargetStatus.QUEUED,
 ];
 
 type AiProcessingResult = {
@@ -116,8 +117,10 @@ export class ConversationOrchestratorService {
       settings.responseDelayMinSeconds,
       settings.responseDelayMaxSeconds,
     );
-    const scheduled = this.delay.schedule(input.messageId, delaySeconds, () =>
-      this.processIncomingClientMessage(input, mockScenario),
+    const scheduled = await this.delay.scheduleConversation(
+      input,
+      delaySeconds,
+      mockScenario,
     );
     if (!scheduled) return this.skip(input, 'ALREADY_SCHEDULED');
 
@@ -302,11 +305,11 @@ export class ConversationOrchestratorService {
       campaignSendingEnabled: settings.campaignSendingEnabled,
       whatsAppConnected: whatsapp.connected,
       openAiConfigured: this.ai.configured,
-      pendingTimers: this.delay.pendingCount,
+      pendingJobs: await this.delay.pendingCount,
     };
   }
 
-  private async processIncomingClientMessage(
+  async processIncomingClientMessage(
     input: KnownInboundMessage,
     mockScenario?: string,
   ) {
@@ -411,6 +414,7 @@ export class ConversationOrchestratorService {
     }
 
     await this.recordDecisionEvent(input, result);
+    await this.syncCampaignTarget(input.conversationId, result);
     if (result.result?.action === 'HANDOFF') {
       void this.telegram.notifyHandoff({
         deduplicationKey: `${result.run.id}:HANDOFF_REQUIRED`,
@@ -443,6 +447,25 @@ export class ConversationOrchestratorService {
         leadId: result.lead.id,
       });
     }
+  }
+
+  private async syncCampaignTarget(
+    conversationId: string,
+    result: AiProcessingResult,
+  ) {
+    const target =
+      await this.campaigns.findTargetByConversationId(conversationId);
+    if (!target) return;
+    const status = result.lead?.id
+      ? CampaignTargetStatus.LEAD
+      : result.result?.action === 'HANDOFF'
+        ? CampaignTargetStatus.HANDOFF
+        : result.result?.leadDecision === 'REJECTED'
+          ? CampaignTargetStatus.REJECTED
+          : CampaignTargetStatus.REPLIED;
+    await this.campaigns.updateTargetStatus(target.campaignId, target.id, {
+      status,
+    });
   }
 
   private async checkIncomingEligibility(

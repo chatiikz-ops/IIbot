@@ -3,14 +3,16 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
+import { allowedOrigins, validateEnvironment } from './config/env';
 
 async function bootstrap() {
+  if (!process.env.DATABASE_URL) process.loadEnvFile();
+  validateEnvironment();
   const app = await NestFactory.create(AppModule);
-  if (!process.env.JWT_ACCESS_SECRET || process.env.JWT_ACCESS_SECRET.length < 32) throw new Error('JWT_ACCESS_SECRET must contain at least 32 characters');
   app.use(helmet());
   app.use(cookieParser());
   app.enableCors({
-    origin: process.env.FRONTEND_URL ?? 'http://localhost:3001',
+    origin: allowedOrigins(),
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true,
     allowedHeaders: ['Authorization', 'Content-Type'],
@@ -25,4 +27,4 @@ async function bootstrap() {
   app.enableShutdownHooks();
   await app.listen(process.env.PORT ?? 3000);
 }
-bootstrap();
+void bootstrap();

@@ -5,6 +5,7 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  UseGuards,
   Req,
   Res,
 } from '@nestjs/common';
@@ -14,6 +15,7 @@ import { AllowPasswordChange, Public } from './auth.decorators';
 import { AuthService } from './auth.service';
 import { ChangePasswordDto, LoginDto } from './dto/auth.dto';
 import type { RequestWithUser } from './auth.types';
+import { OriginGuard } from './origin.guard';
 @Controller('auth')
 export class AuthController {
   constructor(private auth: AuthService) {}
@@ -58,18 +60,20 @@ export class AuthController {
   @Public()
   @Throttle({ default: { limit: 30, ttl: 900000 } })
   @Post('refresh')
+  @UseGuards(OriginGuard)
   async refresh(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const result = await this.auth.refresh(req.cookies?.[this.cookieName()]);
+    const cookies = req.cookies as Record<string, string> | undefined;
+    const result = await this.auth.refresh(cookies?.[this.cookieName()]);
     this.setCookie(res, result.refreshToken);
     return { accessToken: result.accessToken, user: result.user };
   }
   @AllowPasswordChange() @Get('me') me(@Req() req: RequestWithUser) {
     return req.user;
   }
-  @AllowPasswordChange() @Post('logout') async logout(
+  @AllowPasswordChange() @UseGuards(OriginGuard) @Post('logout') async logout(
     @Req() req: RequestWithUser,
     @Res({ passthrough: true }) res: Response,
   ) {
@@ -77,7 +81,7 @@ export class AuthController {
     this.clear(res);
     return { success: true };
   }
-  @Post('logout-all') async logoutAll(
+  @UseGuards(OriginGuard) @Post('logout-all') async logoutAll(
     @Req() req: RequestWithUser,
     @Res({ passthrough: true }) res: Response,
   ) {

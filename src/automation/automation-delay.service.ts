@@ -1,25 +1,34 @@
-import { Injectable, OnApplicationShutdown } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
+import { AutomationJobType } from '../generated/prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import type { KnownInboundMessage } from '../whatsapp/whatsapp-messaging.service';
 
 @Injectable()
-export class AutomationDelayService implements OnApplicationShutdown {
-  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+export class AutomationDelayService {
+  constructor(private readonly prisma: PrismaService) {}
 
-  schedule(key: string, delaySeconds: number, task: () => Promise<void>) {
-    if (this.timers.has(key)) return false;
-    const timer = setTimeout(() => {
-      this.timers.delete(key);
-      void task().catch(() => undefined);
-    }, delaySeconds * 1000);
-    this.timers.set(key, timer);
-    return true;
+  async scheduleConversation(
+    input: KnownInboundMessage,
+    delaySeconds: number,
+    mockScenario?: string,
+  ) {
+    const job = await this.prisma.automationJob.upsert({
+      where: { deduplicationKey: `conversation-reply:${input.messageId}` },
+      create: {
+        type: AutomationJobType.CONVERSATION_REPLY,
+        runAt: new Date(Date.now() + delaySeconds * 1000),
+        contactId: input.contactId,
+        conversationId: input.conversationId,
+        messageId: input.messageId,
+        deduplicationKey: `conversation-reply:${input.messageId}`,
+        payload: { ...input, mockScenario },
+      },
+      update: {},
+    });
+    return job.attempts === 0 && job.status === 'PENDING';
   }
 
   get pendingCount() {
-    return this.timers.size;
-  }
-
-  onApplicationShutdown() {
-    for (const timer of this.timers.values()) clearTimeout(timer);
-    this.timers.clear();
+    return this.prisma.automationJob.count({ where: { status: 'PENDING' } });
   }
 }

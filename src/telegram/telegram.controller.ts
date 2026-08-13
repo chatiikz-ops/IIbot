@@ -54,7 +54,8 @@ export class TelegramController {
     };
   }
   @Roles(AdminRole.OWNER)
-  @Post('recipients') create(@Body() data: CreateTelegramRecipientDto) {
+  @Post('recipients')
+  create(@Body() data: CreateTelegramRecipientDto) {
     return this.recipients.create(data);
   }
   @Get('recipients') recipientsList() {
@@ -64,15 +65,13 @@ export class TelegramController {
     return this.recipients.findOne(id);
   }
   @Roles(AdminRole.OWNER)
-  @Post('recipients/:id/reconnect') reconnect(
-    @Param('id', ParseUUIDPipe) id: string,
-  ) {
+  @Post('recipients/:id/reconnect')
+  reconnect(@Param('id', ParseUUIDPipe) id: string) {
     return this.recipients.reconnect(id);
   }
   @Roles(AdminRole.OWNER)
-  @Post('recipients/:id/disable') disable(
-    @Param('id', ParseUUIDPipe) id: string,
-  ) {
+  @Post('recipients/:id/disable')
+  disable(@Param('id', ParseUUIDPipe) id: string) {
     return this.recipients.disable(id);
   }
   @Post('recipients/:id/test') test(@Param('id', ParseUUIDPipe) id: string) {
@@ -82,7 +81,8 @@ export class TelegramController {
     return this.settings.get();
   }
   @Roles(AdminRole.OWNER)
-  @Patch('settings') updateSettings(@Body() data: UpdateTelegramSettingsDto) {
+  @Patch('settings')
+  updateSettings(@Body() data: UpdateTelegramSettingsDto) {
     return this.settings.update(data);
   }
   @Get('notifications') notificationList(

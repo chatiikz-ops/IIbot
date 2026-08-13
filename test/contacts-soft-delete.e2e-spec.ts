@@ -21,6 +21,8 @@ import {
   WhatsAppMessageStatus,
 } from '../src/generated/prisma/enums';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { AuthGuard } from '../src/auth/auth.guard';
+import { APP_GUARD } from '@nestjs/core';
 
 describe('Contacts soft delete history (e2e)', () => {
   let app: INestApplication;
@@ -31,8 +33,23 @@ describe('Contacts soft delete history (e2e)', () => {
   beforeAll(async () => {
     const module = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideGuard(AuthGuard)
+      .useValue({ canActivate: () => true })
+      .overrideProvider(APP_GUARD)
+      .useValue({ canActivate: () => true })
+      .compile();
     app = module.createNestApplication();
+    app.use(
+      (
+        req: { headers: Record<string, string> },
+        _res: unknown,
+        next: () => void,
+      ) => {
+        req.headers['x-test-auth-bypass'] = 'true';
+        next();
+      },
+    );
     app.useGlobalPipes(
       new ValidationPipe({
         whitelist: true,

@@ -21,7 +21,18 @@ export class ImportsController {
   constructor(private readonly importsService: ImportsService) {}
 
   @Post('preview')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+      fileFilter: (_request, file, callback) => {
+        const allowed = /\.(xlsx|xls|csv)$/i.test(file.originalname);
+        callback(
+          allowed ? null : new Error('Unsupported spreadsheet type'),
+          allowed,
+        );
+      },
+    }),
+  )
   preview(@UploadedFile() file?: Express.Multer.File) {
     return this.importsService.preview(file);
   }

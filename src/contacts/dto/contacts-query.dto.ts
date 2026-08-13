@@ -1,6 +1,10 @@
 import { Type } from 'class-transformer';
 import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
-import { ContactStatus } from '../../generated/prisma/enums';
+import {
+  BusinessType,
+  ContactStatus,
+  CrmProvider,
+} from '../../generated/prisma/enums';
 
 export class ContactsQueryDto {
   @IsOptional()
@@ -23,4 +27,10 @@ export class ContactsQueryDto {
   @IsOptional()
   @IsEnum(ContactStatus)
   status?: ContactStatus;
+
+  @IsOptional() @IsEnum(CrmProvider) crmProvider?: CrmProvider;
+  @IsOptional() @IsEnum(BusinessType) businessType?: BusinessType;
+  @IsOptional() @Type(() => Boolean) outreachEligible?: boolean;
+  @IsOptional() @IsString() strategyCode?: string;
+  @IsOptional() @IsString() city?: string;
 }

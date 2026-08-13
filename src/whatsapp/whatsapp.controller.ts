@@ -13,6 +13,8 @@ import { WhatsAppMessagesQueryDto } from './dto/whatsapp-messages-query.dto';
 import { WhatsAppUnmatchedQueryDto } from './dto/whatsapp-unmatched-query.dto';
 import { WhatsAppClientService } from './whatsapp-client.service';
 import { WhatsAppMessagingService } from './whatsapp-messaging.service';
+import { Roles } from '../auth/auth.decorators';
+import { AdminRole } from '../generated/prisma/enums';
 
 @Controller('whatsapp')
 export class WhatsAppController {
@@ -32,21 +34,25 @@ export class WhatsAppController {
   }
 
   @Post('initialize')
+  @Roles(AdminRole.OWNER)
   initialize() {
     return this.client.initialize();
   }
 
   @Post('reconnect')
+  @Roles(AdminRole.OWNER)
   reconnect() {
     return this.client.reconnect();
   }
 
   @Post('destroy')
+  @Roles(AdminRole.OWNER)
   destroy() {
     return this.client.destroy();
   }
 
   @Post('logout')
+  @Roles(AdminRole.OWNER)
   logout() {
     return this.client.logout();
   }

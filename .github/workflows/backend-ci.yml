@@ -1,0 +1,45 @@
+name: Backend CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: zapis_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/zapis_test?schema=public
+      JWT_ACCESS_SECRET: test-only-secret-that-is-at-least-32-characters
+      FRONTEND_URL: http://localhost:3001
+      REFRESH_TOKEN_TTL_DAYS: 30
+      AUTH_COOKIE_SECURE: 'false'
+      OPENAI_MOCK_MODE: 'true'
+      WHATSAPP_ENABLED: 'false'
+      TELEGRAM_ENABLED: 'false'
+      AUTOMATION_WORKER_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma validate
+      - run: npx prisma generate
+      - run: npx prisma migrate deploy
+      - run: npm run lint:check
+      - run: npm test -- --runInBand
+      - run: npm run test:e2e -- --runInBand
+      - run: npm run build

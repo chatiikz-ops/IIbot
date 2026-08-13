@@ -14,6 +14,7 @@ import { AutomationDelayService } from './automation-delay.service';
 import { AutomationEventsService } from './automation-events.service';
 import { AutomationSettingsService } from './automation-settings.service';
 import { ConversationOrchestratorService } from './conversation-orchestrator.service';
+import { AutomationWorkerService } from './automation-worker.service';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { ConversationOrchestratorService } from './conversation-orchestrator.ser
     AutomationEventsService,
     AutomationDelayService,
     ConversationOrchestratorService,
+    AutomationWorkerService,
   ],
   exports: [ConversationOrchestratorService, AutomationSettingsService],
 })
