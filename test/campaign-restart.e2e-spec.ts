@@ -68,6 +68,7 @@ describe('Campaign restart and outbound idempotency (e2e)', () => {
       })
       .overrideProvider(TelegramNotificationsService)
       .useValue({
+        notifyLeadOutcome: () => Promise.resolve({ skipped: true }),
         notifyHandoff: () => Promise.resolve({ skipped: true }),
         notifyNewLead: () => Promise.resolve({ skipped: true }),
         notifyQualifiedLead: () => Promise.resolve({ skipped: true }),

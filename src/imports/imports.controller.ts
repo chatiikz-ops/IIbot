@@ -13,12 +13,18 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ImportRowsQueryDto } from './dto/import-rows-query.dto';
+import { ImportsQueryDto } from './dto/imports-query.dto';
 import { UpdateMappingDto } from './dto/update-mapping.dto';
 import { ImportsService } from './imports.service';
 
 @Controller('imports')
 export class ImportsController {
   constructor(private readonly importsService: ImportsService) {}
+
+  @Get()
+  findAll(@Query() query: ImportsQueryDto) {
+    return this.importsService.findAll(query);
+  }
 
   @Post('preview')
   @UseInterceptors(

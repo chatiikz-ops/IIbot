@@ -98,6 +98,16 @@ describe('Full sales flow (e2e)', () => {
             });
           };
           return {
+            notifyLeadOutcome: (input: {
+              runId: string;
+              contactId: string;
+              conversationId: string;
+              leadId?: string;
+            }) =>
+              notify({
+                ...input,
+                deduplicationKey: `${input.leadId ?? input.runId}:LEAD_OUTCOME`,
+              }),
             notifyHandoff: notify,
             notifyNewLead: notify,
             notifyQualifiedLead: notify,

@@ -35,14 +35,16 @@ export class WhatsAppController {
 
   @Post('initialize')
   @Roles(AdminRole.OWNER)
-  initialize() {
-    return this.client.initialize();
+  async initialize() {
+    void this.client.initialize().catch(() => undefined);
+    return this.client.getStatus();
   }
 
   @Post('reconnect')
   @Roles(AdminRole.OWNER)
-  reconnect() {
-    return this.client.reconnect();
+  async reconnect() {
+    void this.client.reconnect().catch(() => undefined);
+    return this.client.getStatus();
   }
 
   @Post('destroy')

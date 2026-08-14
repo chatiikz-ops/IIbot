@@ -61,6 +61,7 @@ export class AiDecisionService {
           summary: result.summary,
           extractedData: result.extractedData,
           inputTokens: provider.usage.inputTokens,
+          cachedInputTokens: provider.usage.cachedInputTokens,
           outputTokens: provider.usage.outputTokens,
           totalTokens: provider.usage.totalTokens,
           estimatedCostUsd: estimatedCost,

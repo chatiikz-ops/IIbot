@@ -43,7 +43,7 @@ const HEADER_ALIASES: Record<ImportField, string[]> = {
   ],
   email: ['Email', 'E-mail', 'Почта'],
   address: ['Адрес', 'Address'],
-  notes: ['Комментарий', 'Примечание', 'Notes', 'Description'],
+  notes: ['Заметки', 'Комментарий', 'Примечание', 'Notes', 'Description'],
 };
 
 export function detectColumnMapping(headers: string[]) {

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
 import {
   TelegramNotificationStatus,
@@ -24,6 +24,7 @@ type NotificationInput = {
 
 @Injectable()
 export class TelegramNotificationsService {
+  private readonly logger = new Logger(TelegramNotificationsService.name);
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: TelegramConfigService,
@@ -56,9 +57,15 @@ export class TelegramNotificationsService {
     return this.notify({ ...data, type: TelegramNotificationType.AI_FAILED });
   }
   notifyWhatsAppFailed(data: Omit<NotificationInput, 'type'>) {
-    return this.notify({
-      ...data,
-      type: TelegramNotificationType.WHATSAPP_FAILED,
+    this.logger.warn({
+      event: 'WHATSAPP_TECHNICAL_ALERT_LOGGED',
+      deduplicationKey: data.deduplicationKey,
+      contactId: data.contactId,
+      conversationId: data.conversationId,
+    });
+    return Promise.resolve({
+      skipped: true,
+      reason: 'TECHNICAL_ALERT_NOT_SENT_TO_MANAGER',
     });
   }
   notifyMediaFailed(data: Omit<NotificationInput, 'type'>) {
@@ -74,13 +81,99 @@ export class TelegramNotificationsService {
     });
   }
 
+  async notifyLeadOutcome(data: {
+    runId: string;
+    contactId: string;
+    conversationId: string;
+    leadId?: string;
+    action?: string;
+    leadDecision?: string;
+  }) {
+    try {
+      return await this.notifyLeadOutcomeSafely(data);
+    } catch (error) {
+      this.logger.error({
+        event: 'TELEGRAM_LEAD_OUTCOME_FAILED',
+        runId: data.runId,
+        leadId: data.leadId,
+        error: error instanceof Error ? error.message : 'unknown',
+      });
+      return { skipped: true, reason: 'LEAD_OUTCOME_ENRICHMENT_ERROR' };
+    }
+  }
+
+  private async notifyLeadOutcomeSafely(data: {
+    runId: string;
+    contactId: string;
+    conversationId: string;
+    leadId?: string;
+    action?: string;
+    leadDecision?: string;
+  }) {
+    if (data.action !== 'HANDOFF' && data.leadDecision !== 'QUALIFIED') {
+      return { skipped: true, reason: 'OUTCOME_NOT_NOTIFIABLE' };
+    }
+    const [contact, lead, lastClientMessage] = await Promise.all([
+      this.prisma.contact.findUnique({ where: { id: data.contactId } }),
+      data.leadId
+        ? this.prisma.lead.findUnique({ where: { id: data.leadId } })
+        : null,
+      this.prisma.message.findFirst({
+        where: { conversationId: data.conversationId, role: 'CLIENT' },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+    const handoff = data.action === 'HANDOFF';
+    const type = handoff
+      ? TelegramNotificationType.HANDOFF_REQUIRED
+      : TelegramNotificationType.QUALIFIED_LEAD;
+    const keyOwner = data.leadId ?? data.runId;
+    const text = [
+      handoff
+        ? 'Новый заинтересованный клиент'
+        : 'Новый квалифицированный клиент',
+      '',
+      `Компания: ${contact?.companyName ?? 'не указана'}`,
+      `Телефон: ${contact?.phone ?? 'не указан'}`,
+      `Город: ${contact?.city ?? 'не указан'}`,
+      `Тип: ${contact?.category ?? contact?.businessType ?? 'не указан'}`,
+      '',
+      `Причина передачи: ${lead?.qualificationReason ?? (handoff ? 'Клиент запросил менеджера' : 'Клиент квалифицирован')}`,
+      `Последнее сообщение: ${lastClientMessage?.text.slice(0, 500) ?? 'не найдено'}`,
+      '',
+      'Статус: Нужен менеджер',
+    ].join('\n');
+    return this.notify({
+      type,
+      deduplicationKey: `${keyOwner}:LEAD_OUTCOME`,
+      text,
+      contactId: data.contactId,
+      conversationId: data.conversationId,
+      leadId: data.leadId,
+    });
+  }
+
   async notify(input: NotificationInput) {
+    try {
+      return await this.notifySafely(input);
+    } catch (error) {
+      this.logger.error({
+        event: 'TELEGRAM_NOTIFICATION_FLOW_FAILED',
+        type: input.type,
+        deduplicationKey: input.deduplicationKey,
+        error: error instanceof Error ? error.message : 'unknown',
+      });
+      return { skipped: true, reason: 'NOTIFICATION_FLOW_ERROR' };
+    }
+  }
+
+  private async notifySafely(input: NotificationInput) {
     const settings = await this.settings.get();
     const enabled =
       this.config.enabled &&
       settings.enabled &&
       this.switchEnabled(settings, input.type);
-    if (!enabled) return { skipped: true };
+    if (!enabled) return { skipped: true, reason: 'NOTIFICATION_DISABLED' };
     const recipients = await this.prisma.telegramRecipient.findMany({
       where: {
         status: TelegramRecipientStatus.CONNECTED,
@@ -88,7 +181,14 @@ export class TelegramNotificationsService {
         telegramChatId: { not: null },
       },
     });
-    if (!recipients.length) return { skipped: true };
+    if (!recipients.length) {
+      this.logger.warn({
+        event: 'TELEGRAM_NOTIFICATION_SKIPPED',
+        type: input.type,
+        reason: 'NO_ACTIVE_RECIPIENT',
+      });
+      return { skipped: true, reason: 'NO_ACTIVE_RECIPIENT' };
+    }
     return Promise.all(
       recipients.map(async (recipient) => {
         const key = `${input.deduplicationKey}:${recipient.id}`;
@@ -96,19 +196,32 @@ export class TelegramNotificationsService {
           where: { deduplicationKey: key },
         });
         if (existing) return existing;
-        const notification = await this.prisma.telegramNotification.create({
-          data: {
-            recipientId: recipient.id,
-            type: input.type,
-            status: TelegramNotificationStatus.PENDING,
-            contactId: input.contactId,
-            conversationId: input.conversationId,
-            leadId: input.leadId,
-            automationEventId: input.automationEventId,
-            deduplicationKey: key,
-            messagePreview: input.text.slice(0, 700),
-          },
-        });
+        let notification: { id: string };
+        try {
+          notification = await this.prisma.telegramNotification.create({
+            data: {
+              recipientId: recipient.id,
+              type: input.type,
+              status: TelegramNotificationStatus.PENDING,
+              contactId: input.contactId,
+              conversationId: input.conversationId,
+              leadId: input.leadId,
+              automationEventId: input.automationEventId,
+              deduplicationKey: key,
+              messagePreview: input.text.slice(0, 700),
+            },
+          });
+        } catch (error) {
+          if (
+            error instanceof Prisma.PrismaClientKnownRequestError &&
+            error.code === 'P2002'
+          ) {
+            return this.prisma.telegramNotification.findUniqueOrThrow({
+              where: { deduplicationKey: key },
+            });
+          }
+          throw error;
+        }
         try {
           const sent = await this.bot.sendMessage(
             recipient.telegramChatId!,
@@ -125,6 +238,8 @@ export class TelegramNotificationsService {
               status: TelegramNotificationStatus.SENT,
               providerMessageId: String(sent.message_id),
               sentAt: new Date(),
+              attempts: sent.attempts,
+              lastAttemptAt: new Date(),
             },
           });
         } catch (error) {
@@ -137,6 +252,8 @@ export class TelegramNotificationsService {
                   ? error.message.slice(0, 100)
                   : 'TELEGRAM_ERROR',
               errorMessage: 'Telegram notification failed',
+              attempts: this.errorAttempts(error),
+              lastAttemptAt: new Date(),
             },
           });
         }
@@ -195,5 +312,11 @@ export class TelegramNotificationsService {
       SYSTEM_ERROR: 'notifyOnSystemError',
     };
     return settings[map[type]] === true;
+  }
+
+  private errorAttempts(error: unknown) {
+    if (!error || typeof error !== 'object' || !('attempts' in error)) return 1;
+    const attempts = Number(error.attempts);
+    return Number.isInteger(attempts) && attempts > 0 ? attempts : 1;
   }
 }

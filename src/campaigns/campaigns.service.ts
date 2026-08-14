@@ -9,9 +9,11 @@ import {
   CampaignSourceType,
   CampaignStatus,
   CampaignTargetStatus,
+  PromptStrategyStatus,
 } from '../generated/prisma/enums';
 import { PrismaService } from '../prisma/prisma.service';
 import { CampaignSelectionService } from './campaign-selection.service';
+import { WhatsAppClientService } from '../whatsapp/whatsapp-client.service';
 import type { CampaignLogsQueryDto } from './dto/campaign-logs-query.dto';
 import type { CampaignTargetsQueryDto } from './dto/campaign-targets-query.dto';
 import type { CampaignsQueryDto } from './dto/campaigns-query.dto';
@@ -55,6 +57,7 @@ export class CampaignsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly selection: CampaignSelectionService,
+    private readonly whatsapp: WhatsAppClientService,
   ) {}
 
   async previewTargets(data: PreviewCampaignTargetsDto) {
@@ -214,14 +217,147 @@ export class CampaignsService {
     return this.prisma.campaign.delete({ where: { id } });
   }
 
-  start(id: string) {
-    return this.transition(
-      id,
-      [CampaignStatus.DRAFT, CampaignStatus.SCHEDULED],
-      CampaignStatus.RUNNING,
-      'CAMPAIGN_STARTED',
-      'Кампания запущена',
+  async start(id: string) {
+    const preflight = await this.preflight(id);
+    if (!preflight.ready) {
+      throw new ConflictException({
+        message: 'Кампания не готова к запуску',
+        issues: preflight.issues,
+      });
+    }
+    return this.prisma.$transaction(async (tx) => {
+      const claimed = await tx.campaign.updateMany({
+        where: {
+          id,
+          status: { in: [CampaignStatus.DRAFT, CampaignStatus.SCHEDULED] },
+        },
+        data: { status: CampaignStatus.RUNNING, startedAt: new Date() },
+      });
+      if (claimed.count !== 1) {
+        throw new ConflictException('Кампания уже запущена или изменена');
+      }
+      await this.log(
+        tx,
+        id,
+        'CAMPAIGN_STARTED',
+        'Кампания запущена',
+        undefined,
+        undefined,
+        preflight.campaignStatus,
+        CampaignStatus.RUNNING,
+      );
+      return tx.campaign.findUniqueOrThrow({
+        where: { id },
+        include: { settings: true },
+      });
+    });
+  }
+
+  async preflight(id: string) {
+    const campaign = await this.prisma.campaign.findUnique({
+      where: { id },
+      include: {
+        settings: true,
+        targets: {
+          select: {
+            strategyCode: true,
+            contact: {
+              select: {
+                deletedAt: true,
+                outreachEligible: true,
+                strategyCode: true,
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!campaign) throw new NotFoundException('Кампания не найдена');
+
+    const [automation, whatsapp] = await Promise.all([
+      this.prisma.automationSettings.findUnique({
+        where: { singletonKey: 'global' },
+      }),
+      this.whatsapp.getStatus(),
+    ]);
+    const strategyCodes = [
+      ...new Set(
+        campaign.targets
+          .map((target) => target.strategyCode ?? target.contact.strategyCode)
+          .filter((code): code is string => Boolean(code)),
+      ),
+    ];
+    const strategies = await this.prisma.promptStrategy.findMany({
+      where: { code: { in: strategyCodes } },
+      select: { code: true, status: true, activeVersionId: true },
+    });
+    const byCode = new Map(
+      strategies.map((strategy) => [strategy.code, strategy]),
     );
+    const strategiesReady = strategyCodes.map((code) => {
+      const strategy = byCode.get(code);
+      return {
+        code,
+        status: strategy?.status ?? null,
+        hasActiveVersion: Boolean(strategy?.activeVersionId),
+        ready:
+          strategy?.status === PromptStrategyStatus.ACTIVE &&
+          Boolean(strategy.activeVersionId) &&
+          code !== 'SKIP_EXISTING_CLIENT',
+      };
+    });
+    const issues: Array<{ code: string; message: string }> = [];
+    const issue = (code: string, message: string) =>
+      issues.push({ code, message });
+    if (!campaign.settings)
+      issue('SETTINGS_MISSING', 'Настройки кампании отсутствуют');
+    if (campaign.selectedCount <= 0 || campaign.targets.length === 0)
+      issue('ZERO_TARGETS', 'В кампании нет получателей');
+    if (!automation?.enabled)
+      issue('AUTOMATION_DISABLED', 'Автоматизация отключена');
+    if (!automation?.campaignSendingEnabled)
+      issue('CAMPAIGN_SENDING_DISABLED', 'Отправка кампаний отключена');
+    const whatsappConnected =
+      whatsapp.connected && whatsapp.lifecycleState === 'READY';
+    if (!whatsappConnected)
+      issue('WHATSAPP_NOT_CONNECTED', 'WhatsApp не подключён');
+    if (campaign.targets.some((target) => target.contact.deletedAt))
+      issue('CONTACT_DELETED', 'Кампания содержит удалённые контакты');
+    if (campaign.targets.some((target) => !target.contact.outreachEligible))
+      issue('CONTACT_NOT_ELIGIBLE', 'Кампания содержит исключённые контакты');
+    if (strategyCodes.length === 0)
+      issue('STRATEGY_MISSING', 'Для получателей не выбрана стратегия');
+    for (const strategy of strategiesReady) {
+      if (!strategy.ready)
+        issue('STRATEGY_NOT_READY', `Стратегия ${strategy.code} не активна`);
+    }
+    if (campaign.settings) {
+      if (campaign.settings.dailyMessageLimit <= 0)
+        issue('DAILY_LIMIT_INVALID', 'Дневной лимит должен быть больше нуля');
+      if (campaign.settings.minDelaySeconds > campaign.settings.maxDelaySeconds)
+        issue(
+          'DELAY_RANGE_INVALID',
+          'Минимальная задержка больше максимальной',
+        );
+      try {
+        new Intl.DateTimeFormat('en-US', {
+          timeZone: campaign.settings.timezone,
+        }).format();
+      } catch {
+        issue('TIMEZONE_INVALID', 'Некорректный timezone');
+      }
+    }
+    return {
+      ready: issues.length === 0,
+      issues,
+      targetCount: campaign.targets.length,
+      strategyCodes,
+      strategiesReady,
+      whatsappConnected,
+      automationEnabled: Boolean(automation?.enabled),
+      campaignSendingEnabled: Boolean(automation?.campaignSendingEnabled),
+      campaignStatus: campaign.status,
+    };
   }
 
   pause(id: string) {
@@ -340,6 +476,12 @@ export class CampaignsService {
       where: { id: data.contactId, deletedAt: null },
     });
     if (!contact) throw new NotFoundException('Контакт не найден');
+    if (
+      !contact.outreachEligible ||
+      contact.strategyCode === 'SKIP_EXISTING_CLIENT'
+    ) {
+      throw new ConflictException('Контакт исключён из исходящих кампаний');
+    }
     try {
       return await this.prisma.$transaction(async (tx) => {
         const target = await tx.campaignTarget.create({
@@ -537,6 +679,7 @@ export class CampaignsService {
   private validateSettings(settings: {
     workingHoursStart: string;
     workingHoursEnd: string;
+    timezone: string;
     minDelaySeconds: number;
     maxDelaySeconds: number;
   }) {
@@ -552,6 +695,13 @@ export class CampaignsService {
       throw new BadRequestException(
         'Минимальная пауза не может быть больше максимальной',
       );
+    }
+    try {
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: settings.timezone,
+      }).format();
+    } catch {
+      throw new BadRequestException('Некорректный timezone');
     }
   }
 

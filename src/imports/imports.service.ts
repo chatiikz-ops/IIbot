@@ -17,6 +17,7 @@ import {
 } from '../common/utils/contact-normalization.util';
 import { PrismaService } from '../prisma/prisma.service';
 import type { ImportRowsQueryDto } from './dto/import-rows-query.dto';
+import type { ImportsQueryDto } from './dto/imports-query.dto';
 import {
   MAPPING_FIELDS,
   type ColumnMapping,
@@ -139,6 +140,45 @@ export class ImportsService {
   async findOne(id: string) {
     await this.getJob(id);
     return this.buildPreviewResponse(id);
+  }
+
+  async findAll(query: ImportsQueryDto) {
+    const where: Prisma.ImportJobWhereInput = {
+      status: query.status,
+      ...(query.search
+        ? { fileName: { contains: query.search, mode: 'insensitive' } }
+        : {}),
+    };
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.importJob.findMany({
+        where,
+        select: {
+          id: true,
+          fileName: true,
+          status: true,
+          totalRows: true,
+          validRows: true,
+          invalidRows: true,
+          duplicateRows: true,
+          importedRows: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (query.page - 1) * query.limit,
+        take: query.limit,
+      }),
+      this.prisma.importJob.count({ where }),
+    ]);
+    return {
+      data,
+      meta: {
+        page: query.page,
+        limit: query.limit,
+        total,
+        totalPages: Math.ceil(total / query.limit),
+      },
+    };
   }
 
   async findRows(id: string, query: ImportRowsQueryDto) {

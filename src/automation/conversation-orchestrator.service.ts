@@ -27,8 +27,10 @@ import {
   type KnownInboundMessage,
 } from '../whatsapp/whatsapp-messaging.service';
 import { AutomationDelayService } from './automation-delay.service';
+import { campaignWindow } from './campaign-time.util';
 import { AutomationEventsService } from './automation-events.service';
 import { AutomationSettingsService } from './automation-settings.service';
+import { AutomationJobError } from './automation-job.error';
 
 const TERMINAL_CONVERSATION_STATUSES: ConversationStatus[] = [
   ConversationStatus.CLOSED,
@@ -70,9 +72,14 @@ export class ConversationOrchestratorService {
     media: MediaProcessingService,
     private readonly telegram: TelegramNotificationsService,
   ) {
-    this.whatsapp.onKnownInbound((message) =>
-      this.handleIncomingClientMessage(message).then(() => undefined),
-    );
+    this.whatsapp.onKnownInbound((message) => {
+      this.logger.log({
+        event: 'CONVERSATION_INBOUND_CALLBACK_STARTED',
+        messageId: message.messageId,
+        conversationId: message.conversationId,
+      });
+      return this.handleIncomingClientMessage(message).then(() => undefined);
+    });
     media.onProcessed((message) =>
       this.handleIncomingClientMessage(message).then(() => undefined),
     );
@@ -102,6 +109,21 @@ export class ConversationOrchestratorService {
     if (eligibility) return eligibility;
 
     if (!this.isWithinWorkingHours(settings)) {
+      const nextRunAt = campaignWindow(
+        new Date(),
+        settings.workingHoursStart!,
+        settings.workingHoursEnd!,
+        settings.timezone,
+      ).nextRunAt;
+      const delaySeconds = Math.max(
+        0,
+        Math.ceil((nextRunAt.getTime() - Date.now()) / 1000),
+      );
+      const scheduled = await this.delay.scheduleConversation(
+        input,
+        delaySeconds,
+        mockScenario,
+      );
       await this.events.create({
         type: AutomationEventType.DEFERRED,
         contactId: input.contactId,
@@ -109,8 +131,14 @@ export class ConversationOrchestratorService {
         messageId: input.messageId,
         whatsAppMessageId: input.whatsAppMessageId,
         reason: 'OUTSIDE_WORKING_HOURS',
+        metadata: { nextRunAt, scheduled },
       });
-      return { deferred: true, reason: 'OUTSIDE_WORKING_HOURS' };
+      return {
+        deferred: true,
+        reason: 'OUTSIDE_WORKING_HOURS',
+        nextRunAt,
+        scheduled,
+      };
     }
 
     const delaySeconds = this.randomDelay(
@@ -123,6 +151,14 @@ export class ConversationOrchestratorService {
       mockScenario,
     );
     if (!scheduled) return this.skip(input, 'ALREADY_SCHEDULED');
+
+    this.logger.log({
+      event: 'CONVERSATION_REPLY_SCHEDULED',
+      contactId: input.contactId,
+      conversationId: input.conversationId,
+      messageId: input.messageId,
+      delaySeconds,
+    });
 
     await this.events.create({
       type: AutomationEventType.AUTO_REPLY_SCHEDULED,
@@ -165,10 +201,16 @@ export class ConversationOrchestratorService {
   ) {
     const settings = await this.settings.get();
     if (!settings.enabled) {
-      throw new ForbiddenException('Автоматизация отключена');
+      throw new AutomationJobError(
+        'AUTOMATION_TEMPORARILY_DISABLED',
+        'RETRYABLE',
+        'Автоматизация временно отключена',
+      );
     }
     if (!settings.campaignSendingEnabled) {
-      throw new ForbiddenException(
+      throw new AutomationJobError(
+        'AUTOMATION_TEMPORARILY_DISABLED',
+        'RETRYABLE',
         'Автоматическая отправка кампаний отключена',
       );
     }
@@ -204,6 +246,11 @@ export class ConversationOrchestratorService {
         strategyCode,
       });
       await this.campaigns.attachConversation(target.id, conversation.id);
+    } else if (conversation.strategyCode !== strategyCode) {
+      conversation = await this.conversations.ensureStrategy(
+        conversation.id,
+        strategyCode,
+      );
     }
 
     let aiMessage = await this.messages.findLatestByRole(
@@ -312,6 +359,7 @@ export class ConversationOrchestratorService {
   async processIncomingClientMessage(
     input: KnownInboundMessage,
     mockScenario?: string,
+    automationJobId?: string,
   ) {
     const settings = await this.settings.get();
     if (!settings.enabled || !settings.autoReplyEnabled) {
@@ -324,9 +372,30 @@ export class ConversationOrchestratorService {
       await this.skip(input, 'CONTACT_NOT_ACTIVE');
       return;
     }
-    if (
-      await this.ai.hasProcessedMessage(input.conversationId, input.messageId)
-    ) {
+    const existingRun = await this.ai.hasProcessedMessage(
+      input.conversationId,
+      input.messageId,
+    );
+    if (existingRun) {
+      const existingReply = existingRun.reply
+        ? await this.messages.findAiReply(
+            input.conversationId,
+            existingRun.reply,
+          )
+        : null;
+      if (
+        existingRun.status === 'COMPLETED' &&
+        existingRun.reply &&
+        existingReply?.text === existingRun.reply
+      ) {
+        await this.sendFollowUp(
+          input,
+          existingRun.id,
+          existingReply,
+          automationJobId,
+        );
+        return;
+      }
       await this.skip(input, 'MESSAGE_ALREADY_PROCESSED');
       return;
     }
@@ -359,6 +428,16 @@ export class ConversationOrchestratorService {
           leadDecision: result.result?.leadDecision ?? null,
         },
       });
+      this.logger.log({
+        event: 'AI_FOLLOW_UP_COMPLETED',
+        automationJobId,
+        contactId: input.contactId,
+        conversationId: input.conversationId,
+        sourceMessageId: input.messageId,
+        aiRunId: result.run.id,
+        aiMessageId: result.message?.id ?? null,
+        replyCreated: Boolean(result.message),
+      });
     } catch (error) {
       await this.events.create({
         type: AutomationEventType.AI_FAILED,
@@ -374,6 +453,23 @@ export class ConversationOrchestratorService {
         conversationId: input.conversationId,
       });
       return;
+    }
+
+    void this.telegram.notifyLeadOutcome({
+      runId: result.run.id,
+      contactId: input.contactId,
+      conversationId: input.conversationId,
+      leadId: result.lead?.id,
+      action: result.result?.action,
+      leadDecision: result.result?.leadDecision,
+    });
+    if (result.result?.leadDecision === 'UNCERTAIN') {
+      void this.telegram.notifyAiUncertain({
+        deduplicationKey: `${result.run.id}:AI_UNCERTAIN`,
+        text: '⚠️ AI не уверен\n\nДиалог остановлен и требует проверки менеджера.',
+        contactId: input.contactId,
+        conversationId: input.conversationId,
+      });
     }
 
     if (result.message) {
@@ -395,6 +491,17 @@ export class ConversationOrchestratorService {
           whatsAppMessageId: sent.whatsappMessage.id,
           metadata: { alreadySent: sent.alreadySent },
         });
+        this.logger.log({
+          event: 'WHATSAPP_FOLLOW_UP_SENT',
+          automationJobId,
+          contactId: input.contactId,
+          conversationId: input.conversationId,
+          sourceMessageId: input.messageId,
+          messageId: result.message.id,
+          aiRunId: result.run.id,
+          whatsAppMessageId: sent.whatsappMessage.id,
+          alreadySent: sent.alreadySent,
+        });
       } catch (error) {
         await this.events.create({
           type: AutomationEventType.WHATSAPP_FAILED,
@@ -410,42 +517,73 @@ export class ConversationOrchestratorService {
           contactId: input.contactId,
           conversationId: input.conversationId,
         });
+        throw new AutomationJobError(
+          'WHATSAPP_SEND_OUTCOME_UNKNOWN',
+          'TERMINAL',
+          'WhatsApp transport did not confirm the send outcome',
+        );
       }
     }
 
     await this.recordDecisionEvent(input, result);
     await this.syncCampaignTarget(input.conversationId, result);
-    if (result.result?.action === 'HANDOFF') {
-      void this.telegram.notifyHandoff({
-        deduplicationKey: `${result.run.id}:HANDOFF_REQUIRED`,
-        text: '⚠️ Требуется менеджер\n\nАвтоматический диалог остановлен и требует проверки.',
+  }
+
+  private async sendFollowUp(
+    input: KnownInboundMessage,
+    aiRunId: string,
+    message: { id: string; text: string },
+    automationJobId?: string,
+  ) {
+    const contact = await this.contacts.findOne(input.contactId);
+    try {
+      const sent = await this.whatsapp.sendAiMessage({
+        contactId: input.contactId,
+        conversationId: input.conversationId,
+        messageId: message.id,
+        phone: contact.phone,
+        text: message.text,
+      });
+      await this.events.create({
+        type: AutomationEventType.WHATSAPP_SENT,
+        contactId: input.contactId,
+        conversationId: input.conversationId,
+        messageId: message.id,
+        aiRunId,
+        whatsAppMessageId: sent.whatsappMessage.id,
+        metadata: { alreadySent: sent.alreadySent },
+      });
+      this.logger.log({
+        event: 'WHATSAPP_FOLLOW_UP_SENT',
+        automationJobId,
+        contactId: input.contactId,
+        conversationId: input.conversationId,
+        sourceMessageId: input.messageId,
+        messageId: message.id,
+        aiRunId,
+        whatsAppMessageId: sent.whatsappMessage.id,
+        alreadySent: sent.alreadySent,
+      });
+    } catch (error) {
+      await this.events.create({
+        type: AutomationEventType.WHATSAPP_FAILED,
+        contactId: input.contactId,
+        conversationId: input.conversationId,
+        messageId: message.id,
+        aiRunId,
+        reason: this.errorCode(error),
+      });
+      void this.telegram.notifyWhatsAppFailed({
+        deduplicationKey: `${message.id}:WHATSAPP_FAILED`,
+        text: 'AI reply is saved, but WhatsApp did not confirm delivery.',
         contactId: input.contactId,
         conversationId: input.conversationId,
       });
-    }
-    if (result.result?.leadDecision === 'UNCERTAIN') {
-      void this.telegram.notifyAiUncertain({
-        deduplicationKey: `${result.run.id}:AI_UNCERTAIN`,
-        text: '⚠️ AI не уверен\n\nДиалог остановлен и требует проверки менеджера.',
-        contactId: input.contactId,
-        conversationId: input.conversationId,
-      });
-    }
-    if (result.lead?.id) {
-      void this.telegram.notifyNewLead({
-        deduplicationKey: `${result.lead.id}:NEW_LEAD`,
-        text: '🔥 Новый лид\n\nAI создал лид по результатам диалога.',
-        contactId: input.contactId,
-        conversationId: input.conversationId,
-        leadId: result.lead.id,
-      });
-      void this.telegram.notifyQualifiedLead({
-        deduplicationKey: `${result.lead.id}:QUALIFIED_LEAD`,
-        text: '🔥 Квалифицированный лид\n\nКлиент квалифицирован AI.',
-        contactId: input.contactId,
-        conversationId: input.conversationId,
-        leadId: result.lead.id,
-      });
+      throw new AutomationJobError(
+        'WHATSAPP_SEND_OUTCOME_UNKNOWN',
+        'TERMINAL',
+        'WhatsApp transport did not confirm the send outcome',
+      );
     }
   }
 
@@ -481,10 +619,11 @@ export class ConversationOrchestratorService {
         input.conversationId,
       );
       if (TERMINAL_CONVERSATION_STATUSES.includes(conversation.status)) {
-        throw new ConflictException(
+        return this.skip(
+          input,
           conversation.status === ConversationStatus.HANDOFF_REQUIRED
-            ? 'Диалог передан менеджеру'
-            : 'Диалог завершён для автоматической обработки',
+            ? 'CONVERSATION_HANDOFF_REQUIRED'
+            : `CONVERSATION_TERMINAL_${conversation.status}`,
         );
       }
       const message = await this.messages.findOne(input.messageId);
@@ -492,10 +631,10 @@ export class ConversationOrchestratorService {
         message.role !== MessageRole.CLIENT ||
         message.conversationId !== conversation.id
       ) {
-        throw new ConflictException('Сообщение клиента не принадлежит диалогу');
+        return this.skip(input, 'MESSAGE_NOT_IN_CONVERSATION');
       }
       if (await this.ai.hasProcessedMessage(conversation.id, message.id)) {
-        throw new ConflictException('Сообщение уже обработано');
+        return this.skip(input, 'MESSAGE_ALREADY_PROCESSED');
       }
       await this.assertWhatsAppConnected();
       if (!conversation.strategyCode) {
@@ -526,6 +665,12 @@ export class ConversationOrchestratorService {
           reason: 'AUTO_REPLY_LIMIT_REACHED',
           metadata: { limit },
         });
+        await this.telegram.notifyLeadOutcome({
+          runId: `conversation:${conversation.id}:AUTO_REPLY_LIMIT_REACHED`,
+          contactId: contact.id,
+          conversationId: conversation.id,
+          action: 'HANDOFF',
+        });
         return {
           skipped: true,
           reason: 'AUTO_REPLY_LIMIT_REACHED',
@@ -554,7 +699,13 @@ export class ConversationOrchestratorService {
   private async assertWhatsAppConnected() {
     const status = await this.whatsappClient.getStatus();
     if (!status.connected) {
-      throw new ConflictException('WhatsApp не подключён');
+      throw new AutomationJobError(
+        status.lifecycleState === 'INITIALIZING'
+          ? 'WHATSAPP_INITIALIZING'
+          : 'WHATSAPP_NOT_CONNECTED',
+        'RETRYABLE',
+        'WhatsApp не подключён',
+      );
     }
   }
 

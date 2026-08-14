@@ -32,6 +32,7 @@ export class TelegramApiError extends Error {
     readonly telegramOk: boolean,
     readonly errorCode: number | null,
     message: string,
+    readonly attempts = 1,
   ) {
     super(message);
   }
@@ -86,7 +87,7 @@ export class TelegramBotService implements OnModuleInit, OnApplicationShutdown {
   async getMe(): Promise<TelegramBotIdentity> {
     if (this.config.mockMode)
       return { id: 0, username: 'mock_bot', first_name: 'Mock bot' };
-    return (await this.request('getMe', {})) as TelegramBotIdentity;
+    return (await this.request('getMe', {})).result as TelegramBotIdentity;
   }
 
   async sendMessage(
@@ -96,9 +97,9 @@ export class TelegramBotService implements OnModuleInit, OnApplicationShutdown {
   ) {
     if (this.config.mockMode) {
       this.mockCounter += 1;
-      return { message_id: this.mockCounter };
+      return { message_id: this.mockCounter, attempts: 1 };
     }
-    const result = await this.request('sendMessage', {
+    const response = await this.request('sendMessage', {
       chat_id: chatId.toString(),
       text,
       ...(url
@@ -109,17 +110,22 @@ export class TelegramBotService implements OnModuleInit, OnApplicationShutdown {
           }
         : {}),
     });
-    return result as { message_id: number };
+    return {
+      ...(response.result as { message_id: number }),
+      attempts: response.attempts,
+    };
   }
 
   private async poll() {
     while (this.running) {
       try {
-        const updates = (await this.request('getUpdates', {
-          offset: this.offset,
-          timeout: 20,
-          allowed_updates: ['message'],
-        })) as TelegramUpdate[];
+        const updates = (
+          await this.request('getUpdates', {
+            offset: this.offset,
+            timeout: 20,
+            allowed_updates: ['message'],
+          })
+        ).result as TelegramUpdate[];
         for (const update of updates) {
           this.offset = update.update_id + 1;
           for (const handler of this.handlers) await handler(update);
@@ -158,7 +164,8 @@ export class TelegramBotService implements OnModuleInit, OnApplicationShutdown {
           description?: string;
           parameters?: { retry_after?: number };
         };
-        if (payload.ok) return payload.result;
+        if (payload.ok)
+          return { result: payload.result, attempts: attempt + 1 };
         const retryable =
           payload.error_code === 429 || (payload.error_code ?? 0) >= 500;
         if (!retryable || attempt === 2)
@@ -167,6 +174,7 @@ export class TelegramBotService implements OnModuleInit, OnApplicationShutdown {
             payload.ok,
             payload.error_code ?? null,
             this.safeDescription(payload.description),
+            attempt + 1,
           );
         await new Promise((resolve) =>
           setTimeout(resolve, (payload.parameters?.retry_after ?? 1) * 1000),
@@ -177,7 +185,17 @@ export class TelegramBotService implements OnModuleInit, OnApplicationShutdown {
           !(error instanceof TelegramApiError) ||
           error.errorCode === 429 ||
           (error.httpStatus ?? 0) >= 500;
-        if (!retryable || attempt === 2) throw error;
+        if (!retryable || attempt === 2) {
+          if (error instanceof TelegramApiError) throw error;
+          throw new TelegramApiError(
+            null,
+            false,
+            null,
+            this.safeError(error),
+            attempt + 1,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
       } finally {
         clearTimeout(timer);
       }

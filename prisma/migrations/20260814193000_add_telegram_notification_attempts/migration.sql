@@ -1,0 +1,3 @@
+ALTER TABLE "TelegramNotification"
+ADD COLUMN "attempts" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN "lastAttemptAt" TIMESTAMP(3);

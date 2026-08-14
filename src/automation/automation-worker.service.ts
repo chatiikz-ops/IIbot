@@ -16,6 +16,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import type { KnownInboundMessage } from '../whatsapp/whatsapp-messaging.service';
 import { ConversationOrchestratorService } from './conversation-orchestrator.service';
 import { campaignWindow } from './campaign-time.util';
+import { AutomationJobError } from './automation-job.error';
 
 type ClaimedJob = {
   id: string;
@@ -54,12 +55,25 @@ export class AutomationWorkerService
   ) {}
 
   onApplicationBootstrap() {
-    if (
-      process.env.AUTOMATION_WORKER_ENABLED === 'false' ||
-      (process.env.NODE_ENV === 'test' &&
-        process.env.AUTOMATION_WORKER_ENABLED !== 'true')
-    )
+    const explicitlyDisabled =
+      process.env.AUTOMATION_WORKER_ENABLED === 'false';
+    const disabledInTest =
+      process.env.NODE_ENV === 'test' &&
+      process.env.AUTOMATION_WORKER_ENABLED !== 'true';
+    if (explicitlyDisabled || disabledInTest) {
+      this.logger.warn({
+        event: 'AUTOMATION_WORKER_DISABLED',
+        reason: explicitlyDisabled ? 'EXPLICITLY_DISABLED' : 'TEST_DEFAULT',
+      });
       return;
+    }
+    this.logger.log({
+      event: 'AUTOMATION_WORKER_STARTED',
+      enabled: true,
+      workerId: this.workerId,
+      intervalMs: this.pollMs,
+      batchSize: this.concurrency,
+    });
     this.schedule(0);
   }
 
@@ -81,9 +95,7 @@ export class AutomationWorkerService
         const job = await this.claim();
         if (!job) break;
         this.active += 1;
-        void this.execute(job).finally(() => {
-          this.active -= 1;
-        });
+        this.launchWithinBoundary(job);
       }
     } catch (error) {
       this.logger.error({
@@ -92,6 +104,74 @@ export class AutomationWorkerService
       });
     } finally {
       this.schedule(this.pollMs);
+    }
+  }
+
+  private launchWithinBoundary(job: ClaimedJob): void {
+    void this.executeWithinBoundary(job).catch((error: unknown) => {
+      try {
+        this.logger.error({
+          event: 'AUTOMATION_JOB_BOUNDARY_ESCAPE_SWALLOWED',
+          jobId: job.id,
+          type: job.type,
+          errorCode: this.errorCode(error),
+          error: this.errorMessage(error),
+        });
+      } catch {
+        // Last-resort sink: an individual job cannot terminate the process.
+      }
+    });
+  }
+
+  private async executeWithinBoundary(job: ClaimedJob): Promise<void> {
+    try {
+      await this.execute(job);
+    } catch (error) {
+      try {
+        this.logger.error({
+          event: 'AUTOMATION_JOB_BOUNDARY_FAILURE',
+          jobId: job.id,
+          type: job.type,
+          attempts: job.attempts,
+          errorCode: this.errorCode(error),
+          error: this.errorMessage(error),
+        });
+      } catch {
+        // Recovery must still run when the logger transport itself fails.
+      }
+      await this.recoverBoundaryFailure(job, error);
+    } finally {
+      this.active -= 1;
+    }
+  }
+
+  private async recoverBoundaryFailure(job: ClaimedJob, error: unknown) {
+    try {
+      const exhausted = job.attempts >= job.maxAttempts;
+      await this.prisma.automationJob.updateMany({
+        where: {
+          id: job.id,
+          status: AutomationJobStatus.PROCESSING,
+          lockedBy: this.workerId,
+        },
+        data: {
+          status: exhausted
+            ? AutomationJobStatus.FAILED
+            : AutomationJobStatus.PENDING,
+          runAt: exhausted ? undefined : new Date(Date.now() + 60_000),
+          lockedAt: null,
+          lockedBy: null,
+          lastError: this.errorMessage(error).slice(0, 1000),
+          errorCode: this.errorCode(error),
+        },
+      });
+    } catch (recoveryError) {
+      this.logger.error({
+        event: 'AUTOMATION_JOB_BOUNDARY_RECOVERY_FAILED',
+        jobId: job.id,
+        type: job.type,
+        error: this.errorMessage(recoveryError),
+      });
     }
   }
 
@@ -110,6 +190,15 @@ export class AutomationWorkerService
       FROM candidate WHERE job."id" = candidate."id"
       RETURNING job."id", job."type", job."attempts", job."maxAttempts", job."campaignTargetId", job."payload"
     `;
+    if (rows[0]) {
+      this.logger.log({
+        event: 'AUTOMATION_JOB_CLAIMED',
+        jobId: rows[0].id,
+        type: rows[0].type,
+        attempts: rows[0].attempts,
+        workerId: this.workerId,
+      });
+    }
     return rows[0] ?? null;
   }
 
@@ -119,9 +208,17 @@ export class AutomationWorkerService
         const payload = job.payload as unknown as KnownInboundMessage & {
           mockScenario?: string;
         };
+        this.logger.log({
+          event: 'CONVERSATION_REPLY_PROCESSING',
+          jobId: job.id,
+          conversationId: payload.conversationId,
+          messageId: payload.messageId,
+          attempts: job.attempts,
+        });
         await this.orchestrator.processIncomingClientMessage(
           payload,
           payload.mockScenario,
+          job.id,
         );
       } else if (
         job.type === AutomationJobType.CAMPAIGN_TARGET &&
@@ -140,6 +237,7 @@ export class AutomationWorkerService
               lockedAt: null,
               lockedBy: null,
               lastError: null,
+              errorCode: null,
             },
           });
           return;
@@ -153,14 +251,17 @@ export class AutomationWorkerService
           lockedAt: null,
           lockedBy: null,
           lastError: null,
+          errorCode: null,
         },
       });
     } catch (error) {
-      const terminal = this.isBusinessSkip(error);
+      const terminalCancellation =
+        error instanceof AutomationJobError && error.kind === 'TERMINAL';
+      const terminalFailure = this.isTerminalFailure(error);
       const exhausted = job.attempts >= job.maxAttempts;
-      const status = terminal
+      const status = terminalCancellation
         ? AutomationJobStatus.CANCELLED
-        : exhausted
+        : terminalFailure || exhausted
           ? AutomationJobStatus.FAILED
           : AutomationJobStatus.PENDING;
       const backoff = job.attempts <= 1 ? 15_000 : 60_000;
@@ -175,6 +276,7 @@ export class AutomationWorkerService
           lockedAt: null,
           lockedBy: null,
           lastError: this.errorMessage(error).slice(0, 1000),
+          errorCode: this.errorCode(error),
           completedAt:
             status === AutomationJobStatus.CANCELLED ? new Date() : undefined,
         },
@@ -275,14 +377,60 @@ export class AutomationWorkerService
     }
   }
 
-  private isBusinessSkip(error: unknown) {
-    const status =
-      typeof error === 'object' && error && 'getStatus' in error
-        ? Number((error as { getStatus(): number }).getStatus())
-        : 0;
-    return status === 403 || status === 404 || status === 409;
-  }
   private errorMessage(error: unknown) {
+    if (error instanceof AutomationJobError)
+      return `${error.code}: ${error.message}`;
     return error instanceof Error ? error.message : 'Unknown worker error';
+  }
+
+  private errorCode(error: unknown) {
+    const coded = this.findCodedError(error);
+    if (coded) return coded.code;
+    const statusError = error as { getStatus?: () => unknown } | null;
+    if (
+      statusError &&
+      typeof statusError.getStatus === 'function' &&
+      Number(statusError.getStatus()) === 408
+    )
+      return 'TIMEOUT';
+    if (error instanceof Error && error.name) return error.name;
+    return 'UNKNOWN';
+  }
+
+  private isTerminalFailure(error: unknown) {
+    return this.findCodedError(error)?.retryable === false;
+  }
+
+  private findCodedError(
+    error: unknown,
+  ): { code: string; retryable?: boolean } | null {
+    let current: unknown = error;
+    const seen = new Set<unknown>();
+    while (current && !seen.has(current)) {
+      seen.add(current);
+      if (current instanceof AutomationJobError) {
+        return {
+          code: current.code,
+          retryable: current.kind === 'RETRYABLE',
+        };
+      }
+      if (typeof current !== 'object') return null;
+      const candidate = current as {
+        code?: unknown;
+        retryable?: unknown;
+        cause?: unknown;
+      };
+      if (typeof candidate.code === 'string') {
+        return {
+          code: candidate.code,
+          retryable:
+            typeof candidate.retryable === 'boolean'
+              ? candidate.retryable
+              : undefined,
+        };
+      }
+      current = candidate.cause;
+    }
+    return null;
   }
 }

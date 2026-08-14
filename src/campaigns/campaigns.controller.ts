@@ -61,6 +61,11 @@ export class CampaignsController {
     return this.service.start(id);
   }
 
+  @Get(':id/preflight')
+  preflight(@Param('id', ParseUUIDPipe) id: string) {
+    return this.service.preflight(id);
+  }
+
   @Post(':id/pause')
   pause(@Param('id', ParseUUIDPipe) id: string) {
     return this.service.pause(id);

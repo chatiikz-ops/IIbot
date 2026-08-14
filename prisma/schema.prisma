@@ -82,6 +82,7 @@ model AutomationJob {
   lockedAt         DateTime?
   lockedBy         String?
   lastError        String?
+  errorCode        String?
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
   completedAt      DateTime?
@@ -245,6 +246,7 @@ enum WhatsAppMessageDirection {
 
 enum WhatsAppMessageStatus {
   PENDING
+  OUTCOME_UNKNOWN
   SENT
   DELIVERED
   READ
@@ -472,11 +474,19 @@ model AiRun {
   inputTokens        Int?
   outputTokens       Int?
   totalTokens        Int?
+  cachedInputTokens  Int?
   estimatedCostUsd   Decimal?        @db.Decimal(12, 8)
   latencyMs          Int?
   providerResponseId String?
   errorCode          String?
   errorMessage       String?
+  queuedAt           DateTime        @default(now())
+  startedAt          DateTime?
+  openAiStartedAt    DateTime?
+  openAiFinishedAt   DateTime?
+  durationMs         Int?
+  openAiDurationMs   Int?
+  providerAttempts   Int             @default(0)
   createdAt          DateTime        @default(now())
   completedAt        DateTime?
 
@@ -749,6 +759,8 @@ model TelegramNotification {
   messagePreview    String?
   errorCode         String?
   errorMessage      String?
+  attempts          Int                        @default(0)
+  lastAttemptAt     DateTime?
   createdAt         DateTime                   @default(now())
   sentAt            DateTime?
 

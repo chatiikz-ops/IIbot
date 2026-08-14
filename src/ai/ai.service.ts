@@ -59,7 +59,8 @@ export class AiService {
     const prompt = await this.prompts.build(conversationId, true);
     const run = await this.createRun(conversationId, null, prompt);
     try {
-      const provider = await this.openAi.generate(
+      const provider = await this.generateWithMetrics(
+        run.id,
         prompt.systemPrompt,
         prompt.input,
         scenario,
@@ -79,7 +80,9 @@ export class AiService {
           : provider;
       return await this.decisions.apply(run.id, conversationId, firstProvider);
     } catch (error) {
-      return this.handleProviderError(run.id, error);
+      return await this.handleProviderError(run.id, error);
+    } finally {
+      await this.completeRunMetrics(run.id);
     }
   }
 
@@ -138,14 +141,17 @@ export class AiService {
       throw error;
     }
     try {
-      const provider = await this.openAi.generate(
+      const provider = await this.generateWithMetrics(
+        run.id,
         prompt.systemPrompt,
         prompt.input,
         scenario,
       );
       return await this.decisions.apply(run.id, conversationId, provider);
     } catch (error) {
-      return this.handleProviderError(run.id, error);
+      return await this.handleProviderError(run.id, error);
+    } finally {
+      await this.completeRunMetrics(run.id);
     }
   }
 
@@ -227,7 +233,67 @@ export class AiService {
         promptStrategyId: prompt.promptStrategyId,
         promptVersionId: prompt.promptVersionId,
         model: this.config.providerModel,
+        startedAt: new Date(),
       },
+    });
+  }
+
+  private async generateWithMetrics(
+    aiRunId: string,
+    systemPrompt: string,
+    input: Array<{
+      role: 'system' | 'user' | 'assistant';
+      content: string;
+    }>,
+    scenario: Parameters<OpenAiService['generate']>[2],
+  ) {
+    const startedAt = new Date();
+    await this.prisma.aiRun.update({
+      where: { id: aiRunId },
+      data: { openAiStartedAt: startedAt },
+    });
+    try {
+      const provider = await this.openAi.generate(
+        systemPrompt,
+        input,
+        scenario,
+      );
+      await this.prisma.aiRun.update({
+        where: { id: aiRunId },
+        data: { providerAttempts: provider.attempts },
+      });
+      return provider;
+    } catch (error) {
+      await this.prisma.aiRun.update({
+        where: { id: aiRunId },
+        data: {
+          providerAttempts:
+            error instanceof AiProviderError ? error.attempts : 1,
+        },
+      });
+      throw error;
+    } finally {
+      const finishedAt = new Date();
+      await this.prisma.aiRun.update({
+        where: { id: aiRunId },
+        data: {
+          openAiFinishedAt: finishedAt,
+          openAiDurationMs: finishedAt.getTime() - startedAt.getTime(),
+          durationMs: finishedAt.getTime() - startedAt.getTime(),
+        },
+      });
+    }
+  }
+
+  private async completeRunMetrics(aiRunId: string) {
+    const run = await this.prisma.aiRun.findUnique({
+      where: { id: aiRunId },
+      select: { startedAt: true },
+    });
+    if (!run?.startedAt) return;
+    await this.prisma.aiRun.update({
+      where: { id: aiRunId },
+      data: { durationMs: Date.now() - run.startedAt.getTime() },
     });
   }
 
@@ -251,14 +317,16 @@ export class AiService {
     if (providerError.code === 'TIMEOUT') {
       throw new RequestTimeoutException(
         'Запрос к OpenAI превысил время ожидания',
+        { cause: providerError },
       );
     }
     if (providerError.code === 'INVALID_OUTPUT') {
-      throw new BadGatewayException('OpenAI не вернул корректный результат');
+      throw new BadGatewayException('OpenAI не вернул корректный результат', {
+        cause: providerError,
+      });
     }
-    if (providerError.code === 'REQUEST_ERROR') {
-      throw new ServiceUnavailableException('OpenAI временно недоступен');
-    }
-    throw new ServiceUnavailableException('OpenAI временно недоступен');
+    throw new ServiceUnavailableException('OpenAI временно недоступен', {
+      cause: providerError,
+    });
   }
 }

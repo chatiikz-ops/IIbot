@@ -1,0 +1,2 @@
+ALTER TABLE "AiRun"
+ADD COLUMN "providerAttempts" INTEGER NOT NULL DEFAULT 0;

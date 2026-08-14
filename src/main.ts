@@ -1,4 +1,4 @@
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import cookieParser from 'cookie-parser';
@@ -25,6 +25,16 @@ async function bootstrap() {
     }),
   );
   app.enableShutdownHooks();
-  await app.listen(process.env.PORT ?? 3000);
+  const port = Number(process.env.PORT ?? 3000);
+  await app.listen(port);
+  new Logger('Bootstrap').log({
+    event: 'RUNTIME_STARTED',
+    pid: process.pid,
+    nodeEnv: process.env.NODE_ENV ?? 'development',
+    nodeVersion: process.version,
+    port,
+    runtimeVersion:
+      process.env.RENDER_GIT_COMMIT ?? process.env.GIT_COMMIT ?? null,
+  });
 }
 void bootstrap();

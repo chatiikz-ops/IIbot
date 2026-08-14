@@ -110,4 +110,11 @@ export class MessagesService {
       orderBy: { createdAt: 'desc' },
     });
   }
+
+  findAiReply(conversationId: string, text: string) {
+    return this.prisma.message.findFirst({
+      where: { conversationId, role: MessageRole.AI, text },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
 }

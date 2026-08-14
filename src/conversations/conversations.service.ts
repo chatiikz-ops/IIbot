@@ -106,6 +106,14 @@ export class ConversationsService {
     });
   }
 
+  async ensureStrategy(id: string, strategyCode: string) {
+    await this.ensureExists(id);
+    return this.prisma.conversation.update({
+      where: { id },
+      data: { strategyCode },
+    });
+  }
+
   private async ensureExists(id: string) {
     const exists = await this.prisma.conversation.findUnique({
       where: { id },

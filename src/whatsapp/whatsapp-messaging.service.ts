@@ -64,6 +64,10 @@ export class WhatsAppMessagingService {
 
   onKnownInbound(handler: (message: KnownInboundMessage) => Promise<void>) {
     this.knownInboundHandlers.push(handler);
+    this.logger.log({
+      event: 'WHATSAPP_KNOWN_INBOUND_HANDLER_REGISTERED',
+      handlersCount: this.knownInboundHandlers.length,
+    });
   }
 
   async sendAiMessage(data: SendAiMessageInput) {
@@ -92,34 +96,14 @@ export class WhatsAppMessagingService {
     const chatId = this.toChatId(phone);
     await this.ensureRegistered(chatId);
 
-    let pending: { id: string };
-    try {
-      pending = await this.prisma.whatsAppMessage.create({
-        data: {
-          direction: WhatsAppMessageDirection.OUTBOUND,
-          status: WhatsAppMessageStatus.PENDING,
-          phone,
-          text: data.text,
-          contactId: data.contactId,
-          conversationId: data.conversationId,
-          messageId: data.messageId,
-        },
-      });
-    } catch (error) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
-      ) {
-        const duplicate = await this.prisma.whatsAppMessage.findUniqueOrThrow({
-          where: { messageId: data.messageId },
-        });
-        return {
-          whatsappMessage: this.safeMessage(duplicate),
-          alreadySent: true,
-        };
-      }
-      throw error;
+    const prepared = await this.createPendingAiMessage(data, phone);
+    if (!prepared.shouldSend) {
+      return {
+        whatsappMessage: this.safeMessage(prepared.message),
+        alreadySent: true,
+      };
     }
+    const pending = prepared.message;
 
     try {
       const sent = await this.client.sendText(chatId, data.text);
@@ -136,9 +120,48 @@ export class WhatsAppMessagingService {
         whatsappMessage: this.safeMessage(whatsappMessage),
         alreadySent: false,
       };
-    } catch {
-      await this.markFailed(pending.id);
+    } catch (error) {
+      await this.markOutcomeUnknown(pending.id);
+      this.logger.error({
+        event: 'WHATSAPP_OUTBOUND_FAILED',
+        whatsAppMessageId: pending.id,
+        messageId: data.messageId,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+      });
       throw new BadGatewayException('Не удалось отправить ответ в WhatsApp');
+    }
+  }
+
+  private async createPendingAiMessage(
+    data: SendAiMessageInput,
+    phone: string,
+  ) {
+    try {
+      return {
+        message: await this.prisma.whatsAppMessage.create({
+          data: {
+            direction: WhatsAppMessageDirection.OUTBOUND,
+            status: WhatsAppMessageStatus.PENDING,
+            phone,
+            text: data.text,
+            contactId: data.contactId,
+            conversationId: data.conversationId,
+            messageId: data.messageId,
+          },
+        }),
+        shouldSend: true,
+      };
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        const duplicate = await this.prisma.whatsAppMessage.findUniqueOrThrow({
+          where: { messageId: data.messageId },
+        });
+        return { message: duplicate, shouldSend: false };
+      }
+      throw error;
     }
   }
 
@@ -314,16 +337,42 @@ export class WhatsAppMessagingService {
   }
 
   async handleInbound(message: WebMessage) {
+    const identity = WhatsAppClientService.externalMessageIdentity(message);
+    this.logger.debug({
+      event: 'WHATSAPP_INBOUND_RECEIVED',
+      externalMessageId: identity.value,
+      externalMessageIdSource: identity.source,
+      from: message.from,
+      to: message.to,
+      fromMe: message.fromMe,
+      bodyPresent: Boolean(message.body?.trim()),
+      type: message.type,
+    });
+    this.logger.debug({
+      event: 'WHATSAPP_INBOUND_ID_DEBUG',
+      hasId: Boolean(message.id),
+      serialized: message.id?._serialized ?? null,
+      innerId: message.id?.id ?? null,
+      remote: message.id?.remote ?? null,
+      fromMe: message.id?.fromMe,
+    });
     if (!WhatsAppClientService.isEligibleInbound(message)) return;
     if (message.hasMedia) {
       await this.handleMediaInbound(message);
       return;
     }
     if (!WhatsAppClientService.isSupportedInbound(message)) return;
-    const externalMessageId = WhatsAppClientService.externalMessageId(message);
-    if (!externalMessageId) return;
-    const phone = this.fromChatId(message.from);
-    if (!phone) return;
+    const externalMessageId = identity.value;
+    const phone = await this.resolveSenderPhone(message);
+    if (!phone) {
+      this.logger.error({
+        event: 'WHATSAPP_INBOUND_QUARANTINED',
+        externalMessageId,
+        externalMessageIdSource: identity.source,
+        reason: 'PHONE_RESOLUTION_FAILED',
+      });
+      return;
+    }
 
     try {
       const stored = await this.prisma.$transaction(async (tx) => {
@@ -384,6 +433,23 @@ export class WhatsAppMessagingService {
       this.logger.log(
         `Inbound WhatsApp message stored (${this.shortId(stored.externalMessageId)})`,
       );
+      this.logger.log({
+        event: 'WHATSAPP_INBOUND_RESOLVED',
+        externalMessageId,
+        externalMessageIdSource: identity.source,
+        rawFrom: message.from,
+        resolvedPhone: phone,
+        contactMatched: Boolean(stored.contactId),
+        conversationMatched: Boolean(stored.conversationId),
+      });
+      this.logger.log({
+        event: 'WHATSAPP_INBOUND_STORED',
+        externalMessageId,
+        whatsAppMessageId: stored.id,
+        contactId: stored.contactId,
+        conversationId: stored.conversationId,
+        messageId: stored.messageId,
+      });
       if (stored.contactId && stored.conversationId && stored.messageId) {
         const payload: KnownInboundMessage = {
           contactId: stored.contactId,
@@ -391,12 +457,21 @@ export class WhatsAppMessagingService {
           messageId: stored.messageId,
           whatsAppMessageId: stored.id,
         };
+        this.logger.log({
+          event: 'WHATSAPP_KNOWN_INBOUND_DISPATCH',
+          handlersCount: this.knownInboundHandlers.length,
+          messageId: payload.messageId,
+          conversationId: payload.conversationId,
+        });
         for (const handler of this.knownInboundHandlers) {
-          void handler(payload).catch(() =>
-            this.logger.error(
-              `Inbound automation callback failed (${this.shortId(stored.externalMessageId)})`,
-            ),
-          );
+          void handler(payload).catch((error: unknown) => {
+            this.logger.error({
+              event: 'WHATSAPP_KNOWN_INBOUND_CALLBACK_FAILED',
+              messageId: payload.messageId,
+              conversationId: payload.conversationId,
+              errorName: error instanceof Error ? error.name : 'UnknownError',
+            });
+          });
         }
       }
     } catch (error) {
@@ -411,10 +486,18 @@ export class WhatsAppMessagingService {
   }
 
   private async handleMediaInbound(message: WebMessage) {
-    const externalMessageId = WhatsAppClientService.externalMessageId(message);
-    if (!externalMessageId) return;
-    const phone = this.fromChatId(message.from);
-    if (!phone) return;
+    const identity = WhatsAppClientService.externalMessageIdentity(message);
+    const externalMessageId = identity.value;
+    const phone = await this.resolveSenderPhone(message);
+    if (!phone) {
+      this.logger.error({
+        event: 'WHATSAPP_INBOUND_QUARANTINED',
+        externalMessageId,
+        externalMessageIdSource: identity.source,
+        reason: 'PHONE_RESOLUTION_FAILED',
+      });
+      return;
+    }
     try {
       const stored = await this.prisma.$transaction(async (tx) => {
         const contact = await tx.contact.findFirst({
@@ -479,13 +562,93 @@ export class WhatsAppMessagingService {
     const externalMessageId = WhatsAppClientService.externalMessageId(message);
     const status = WhatsAppClientService.ackStatus(ack);
     if (!externalMessageId || !status) return;
-    await this.prisma.whatsAppMessage.updateMany({
-      where: { externalMessageId },
+    this.logger.debug(
+      JSON.stringify({
+        event: 'whatsapp_ack',
+        externalMessageId,
+        ack,
+        mappedStatus: status,
+      }),
+    );
+    const updated = await this.prisma.whatsAppMessage.updateMany({
+      where: {
+        externalMessageId,
+        status: { in: this.ackUpdatableStatuses(status) },
+      },
       data: {
         status,
         ...(status === WhatsAppMessageStatus.FAILED
           ? { errorMessage: 'WhatsApp delivery failed' }
           : {}),
+      },
+    });
+    if (updated.count === 0 && status !== WhatsAppMessageStatus.FAILED) {
+      await this.reconcileUnknownAck(message, externalMessageId, status);
+    }
+  }
+
+  private ackUpdatableStatuses(status: WhatsAppMessageStatus) {
+    if (status === WhatsAppMessageStatus.SENT) {
+      return [
+        WhatsAppMessageStatus.PENDING,
+        WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+        WhatsAppMessageStatus.FAILED,
+      ];
+    }
+    if (status === WhatsAppMessageStatus.DELIVERED) {
+      return [
+        WhatsAppMessageStatus.PENDING,
+        WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+        WhatsAppMessageStatus.FAILED,
+        WhatsAppMessageStatus.SENT,
+      ];
+    }
+    if (status === WhatsAppMessageStatus.READ) {
+      return [
+        WhatsAppMessageStatus.PENDING,
+        WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+        WhatsAppMessageStatus.FAILED,
+        WhatsAppMessageStatus.SENT,
+        WhatsAppMessageStatus.DELIVERED,
+      ];
+    }
+    if (status === WhatsAppMessageStatus.FAILED) {
+      return [WhatsAppMessageStatus.PENDING];
+    }
+    return [];
+  }
+
+  private async reconcileUnknownAck(
+    message: WebMessage,
+    externalMessageId: string,
+    status: WhatsAppMessageStatus,
+  ) {
+    const phone = this.fromChatId(message.to);
+    if (!phone) return;
+    const candidate = await this.prisma.whatsAppMessage.findFirst({
+      where: {
+        direction: WhatsAppMessageDirection.OUTBOUND,
+        externalMessageId: null,
+        phone,
+        text: message.body,
+        status: {
+          in: [
+            WhatsAppMessageStatus.PENDING,
+            WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+            WhatsAppMessageStatus.FAILED,
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!candidate) return;
+    await this.prisma.whatsAppMessage.updateMany({
+      where: { id: candidate.id, externalMessageId: null },
+      data: {
+        externalMessageId,
+        status,
+        sentAt: candidate.sentAt ?? new Date(),
+        errorMessage: null,
       },
     });
   }
@@ -525,6 +688,62 @@ export class WhatsAppMessagingService {
     return /^\d{7,15}$/.test(digits) ? `+${digits}` : null;
   }
 
+  private async resolveSenderPhone(message: WebMessage) {
+    if (message.from.endsWith('@c.us')) return this.fromChatId(message.from);
+    if (!message.from.endsWith('@lid')) return null;
+    try {
+      const identity = await this.client.resolveLidIdentity(message.from);
+      if (identity) {
+        const resolvedPhone = this.fromChatId(identity.chatId);
+        if (resolvedPhone) {
+          this.logger.log({
+            event: 'WHATSAPP_INBOUND_IDENTITY_RESOLVED',
+            lid: message.from,
+            resolvedChatId: identity.chatId,
+            resolvedPhone,
+            source: identity.source,
+          });
+          return resolvedPhone;
+        }
+      }
+
+      const contact = await message.getContact();
+      const formattedNumber = await contact
+        .getFormattedNumber()
+        .catch(() => null);
+      const countryCode = await contact.getCountryCode().catch(() => null);
+      this.logger.debug({
+        event: 'WHATSAPP_INBOUND_LID_CONTACT_DEBUG',
+        messageFrom: message.from,
+        messageAuthor: message.author ?? null,
+        contactId: contact.id?._serialized ?? null,
+        contactNumber: contact.number ?? null,
+        contactIsMyContact: contact.isMyContact,
+        formattedNumber,
+        countryCode,
+      });
+
+      const contactChatId = contact.id?._serialized;
+      if (contactChatId?.endsWith('@c.us')) {
+        const resolvedPhone = this.fromChatId(contactChatId);
+        if (resolvedPhone) return resolvedPhone;
+      }
+      if (formattedNumber) {
+        const resolvedPhone = normalizePhone(formattedNumber);
+        if (resolvedPhone) return resolvedPhone;
+      }
+      return null;
+    } catch (error) {
+      this.logger.warn({
+        event: 'WHATSAPP_INBOUND_PHONE_RESOLUTION_FAILED',
+        externalMessageId: WhatsAppClientService.externalMessageId(message),
+        from: message.from,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+      });
+      return null;
+    }
+  }
+
   private async ensureRegistered(chatId: string) {
     if (!(await this.client.isRegisteredUser(chatId))) {
       throw new BadRequestException('Номер не зарегистрирован в WhatsApp');
@@ -537,6 +756,25 @@ export class WhatsAppMessagingService {
       data: {
         status: WhatsAppMessageStatus.FAILED,
         errorMessage: 'WhatsApp send failed',
+      },
+    });
+  }
+
+  private async markOutcomeUnknown(id: string) {
+    await this.prisma.whatsAppMessage.updateMany({
+      where: {
+        id,
+        status: {
+          in: [
+            WhatsAppMessageStatus.PENDING,
+            WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+          ],
+        },
+      },
+      data: {
+        status: WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+        errorMessage:
+          'WhatsApp send outcome is unknown; automatic retry disabled',
       },
     });
   }

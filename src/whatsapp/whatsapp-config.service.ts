@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
 
 @Injectable()
 export class WhatsAppConfigService {
@@ -31,8 +32,34 @@ export class WhatsAppConfigService {
     );
   }
 
+  get runtimeLockPath() {
+    return join(this.sessionPath, `.runtime-${this.clientId}.lock`);
+  }
+
   get headless() {
     return process.env.WHATSAPP_HEADLESS?.trim().toLowerCase() !== 'false';
+  }
+
+  get chromeExecutablePath() {
+    const value = process.env.WHATSAPP_CHROME_EXECUTABLE_PATH?.trim();
+    if (!value) return undefined;
+    if (!isAbsolute(value)) {
+      throw new Error('WHATSAPP_CHROME_EXECUTABLE_PATH must be absolute');
+    }
+    if (!existsSync(value)) {
+      throw new Error('WHATSAPP_CHROME_EXECUTABLE_PATH does not exist');
+    }
+    return value;
+  }
+
+  get browserLaunchOptions() {
+    return {
+      headless: this.headless,
+      ...(this.chromeExecutablePath
+        ? { executablePath: this.chromeExecutablePath }
+        : {}),
+      args: [] as string[],
+    };
   }
 
   get qrTtlSeconds() {

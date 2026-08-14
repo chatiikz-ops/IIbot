@@ -17,11 +17,23 @@ export class AiConfigService {
   }
 
   get timeoutMs() {
-    return this.positiveInteger('OPENAI_TIMEOUT_MS', 30_000);
+    return this.positiveInteger('OPENAI_TIMEOUT_MS', 25_000);
   }
 
   get maxRetries() {
-    return this.nonNegativeInteger('OPENAI_MAX_RETRIES', 2);
+    return this.nonNegativeInteger('OPENAI_MAX_RETRIES', 1);
+  }
+
+  get maxOutputTokens() {
+    return this.positiveInteger('OPENAI_MAX_OUTPUT_TOKENS', 600);
+  }
+
+  get reasoningEffort() {
+    const value = process.env.OPENAI_REASONING_EFFORT?.trim() || 'minimal';
+    if (!['none', 'minimal', 'low', 'medium', 'high'].includes(value)) {
+      throw new Error('OPENAI_REASONING_EFFORT has an invalid value');
+    }
+    return value as 'none' | 'minimal' | 'low' | 'medium' | 'high';
   }
 
   get mockMode() {

@@ -4,7 +4,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
-import { CampaignSourceType } from '../generated/prisma/enums';
+import {
+  CampaignSourceType,
+  ImportRowStatus,
+  ImportStatus,
+} from '../generated/prisma/enums';
 import { PrismaService } from '../prisma/prisma.service';
 import type { CampaignFiltersDto } from './dto/campaign-filters.dto';
 
@@ -46,12 +50,18 @@ export class CampaignSelectionService {
       }
       const importJob = await this.prisma.importJob.findUnique({
         where: { id: selection.sourceImportJobId },
-        select: { id: true },
+        select: { id: true, status: true },
       });
       if (!importJob) throw new NotFoundException('Импорт не найден');
+      if (importJob.status !== ImportStatus.COMPLETED) {
+        throw new BadRequestException(
+          'Источником кампании может быть только завершённый импорт',
+        );
+      }
       const rows = await this.prisma.importRow.findMany({
         where: {
           importJobId: selection.sourceImportJobId,
+          status: ImportRowStatus.IMPORTED,
           contactId: { not: null },
         },
         select: { contactId: true },
@@ -63,10 +73,10 @@ export class CampaignSelectionService {
 
     return {
       deletedAt: null,
+      outreachEligible: true,
       ...(sourceContactIds ? { id: { in: sourceContactIds } } : {}),
       businessType: filters.businessType,
       crmProvider: filters.crmProvider,
-      outreachEligible: filters.outreachEligible,
       strategyCode: filters.strategyCode,
       status: filters.contactStatus,
       ...(filters.city
