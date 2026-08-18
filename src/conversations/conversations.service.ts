@@ -9,6 +9,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import type { ConversationsQueryDto } from './dto/conversations-query.dto';
 import type { CreateConversationDto } from './dto/create-conversation.dto';
 import type { UpdateConversationStatusDto } from './dto/update-conversation-status.dto';
+import { isTerminalConversationStatus } from './conversation-status';
 
 @Injectable()
 export class ConversationsService {
@@ -21,11 +22,11 @@ export class ConversationsService {
     });
     if (!contact) throw new NotFoundException('Контакт не найден');
 
-    const active = await this.prisma.conversation.findFirst({
-      where: { contactId: data.contactId, status: ConversationStatus.ACTIVE },
-      orderBy: { startedAt: 'desc' },
+    const latest = await this.prisma.conversation.findFirst({
+      where: { contactId: data.contactId },
+      orderBy: [{ lastMessageAt: 'desc' }, { startedAt: 'desc' }],
     });
-    if (active) return active;
+    if (latest && !isTerminalConversationStatus(latest.status)) return latest;
 
     if (data.promptVersionId) {
       const version = await this.prisma.promptVersion.findUnique({

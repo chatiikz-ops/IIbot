@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { MessageAck, type Message as WebMessage } from 'whatsapp-web.js';
 import { normalizePhone } from '../common/utils/phone.util';
+import { isTerminalConversationStatus } from '../conversations/conversation-status';
 import { Prisma } from '../generated/prisma/client';
 import {
   ConversationStatus,
@@ -24,13 +25,6 @@ import type { WhatsAppMessagesQueryDto } from './dto/whatsapp-messages-query.dto
 import type { WhatsAppUnmatchedQueryDto } from './dto/whatsapp-unmatched-query.dto';
 import { WhatsAppClientService } from './whatsapp-client.service';
 
-const ACTIVE_CONVERSATION_STATUSES = [
-  ConversationStatus.NEW,
-  ConversationStatus.ACTIVE,
-  ConversationStatus.WAITING_CLIENT,
-  ConversationStatus.HANDOFF_REQUIRED,
-];
-
 export type KnownInboundMessage = {
   contactId: string;
   conversationId: string;
@@ -45,6 +39,19 @@ export type SendAiMessageInput = {
   phone: string;
   text: string;
 };
+
+class WhatsAppTransportError extends Error {
+  readonly retryable = false;
+
+  constructor(
+    readonly code: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'WhatsAppTransportError';
+  }
+}
 
 @Injectable()
 export class WhatsAppMessagingService {
@@ -107,7 +114,14 @@ export class WhatsAppMessagingService {
 
     try {
       const sent = await this.client.sendText(chatId, data.text);
-      const externalMessageId = WhatsAppClientService.externalMessageId(sent);
+      const identity = WhatsAppClientService.externalMessageIdentity(sent);
+      if (identity.source === 'FALLBACK_ID') {
+        throw new WhatsAppTransportError(
+          'WHATSAPP_EXTERNAL_ID_MISSING',
+          'WhatsApp accepted the message without a provider message id',
+        );
+      }
+      const externalMessageId = identity.value;
       const whatsappMessage = await this.prisma.whatsAppMessage.update({
         where: { id: pending.id },
         data: {
@@ -122,13 +136,27 @@ export class WhatsAppMessagingService {
       };
     } catch (error) {
       await this.markOutcomeUnknown(pending.id);
+      const transportError =
+        error instanceof WhatsAppTransportError
+          ? error
+          : new WhatsAppTransportError(
+              'WHATSAPP_SEND_OUTCOME_UNKNOWN',
+              'WhatsApp transport did not confirm the send outcome',
+              { cause: error },
+            );
       this.logger.error({
         event: 'WHATSAPP_OUTBOUND_FAILED',
+        stage: 'WHATSAPP_OUTBOUND',
         whatsAppMessageId: pending.id,
         messageId: data.messageId,
-        errorName: error instanceof Error ? error.name : 'UnknownError',
+        errorCode: transportError.code,
+        errorName: transportError.name,
+        errorMessage: transportError.message.slice(0, 1000),
+        errorStack: this.safeErrorStack(transportError),
       });
-      throw new BadGatewayException('Не удалось отправить ответ в WhatsApp');
+      throw new BadGatewayException('Не удалось отправить ответ в WhatsApp', {
+        cause: transportError,
+      });
     }
   }
 
@@ -247,7 +275,9 @@ export class WhatsAppMessagingService {
         await tx.conversation.update({
           where: { id: prepared.conversation.id },
           data: {
-            status: ConversationStatus.WAITING_CLIENT,
+            status: isTerminalConversationStatus(prepared.conversation.status)
+              ? prepared.conversation.status
+              : ConversationStatus.WAITING_CLIENT,
             lastMessageAt: message.createdAt,
             messageCount: { increment: 1 },
           },
@@ -404,10 +434,9 @@ export class WhatsAppMessagingService {
             text: message.body.trim(),
           },
         });
-        const nextStatus =
-          conversation.status === ConversationStatus.HANDOFF_REQUIRED
-            ? ConversationStatus.HANDOFF_REQUIRED
-            : ConversationStatus.ACTIVE;
+        const nextStatus = isTerminalConversationStatus(conversation.status)
+          ? conversation.status
+          : ConversationStatus.ACTIVE;
         await tx.conversation.update({
           where: { id: conversation.id },
           data: {
@@ -659,8 +688,8 @@ export class WhatsAppMessagingService {
     strategyCode: string | null,
   ) {
     const existing = await tx.conversation.findFirst({
-      where: { contactId, status: { in: ACTIVE_CONVERSATION_STATUSES } },
-      orderBy: { startedAt: 'desc' },
+      where: { contactId },
+      orderBy: [{ lastMessageAt: 'desc' }, { startedAt: 'desc' }],
     });
     if (existing) return existing;
     return tx.conversation.create({
@@ -746,7 +775,12 @@ export class WhatsAppMessagingService {
 
   private async ensureRegistered(chatId: string) {
     if (!(await this.client.isRegisteredUser(chatId))) {
-      throw new BadRequestException('Номер не зарегистрирован в WhatsApp');
+      throw new BadRequestException('Номер не зарегистрирован в WhatsApp', {
+        cause: new WhatsAppTransportError(
+          'WHATSAPP_NOT_REGISTERED',
+          'Phone is not registered in WhatsApp',
+        ),
+      });
     }
   }
 
@@ -782,6 +816,12 @@ export class WhatsAppMessagingService {
   private messageDate(message: WebMessage) {
     const value = new Date(message.timestamp * 1000);
     return Number.isNaN(value.getTime()) ? new Date() : value;
+  }
+
+  private safeErrorStack(error: Error) {
+    return (
+      error.stack?.split('\n').slice(0, 8).join('\n').slice(0, 4000) ?? null
+    );
   }
 
   private shortId(value: string | null) {

@@ -51,6 +51,19 @@ const REPLIED_TARGET_STATUSES = new Set<CampaignTargetStatus>([
   CampaignTargetStatus.LEAD,
   CampaignTargetStatus.HANDOFF,
 ]);
+const TARGET_OUTCOME_PRIORITY = new Map<CampaignTargetStatus, number>([
+  [CampaignTargetStatus.REJECTED, 1],
+  [CampaignTargetStatus.HANDOFF, 2],
+  [CampaignTargetStatus.LEAD, 3],
+]);
+const OPEN_TARGET_STATUSES = new Set<CampaignTargetStatus>([
+  CampaignTargetStatus.WAITING,
+  CampaignTargetStatus.READY,
+  CampaignTargetStatus.QUEUED,
+  CampaignTargetStatus.PROCESSING,
+  CampaignTargetStatus.MESSAGE_SENT,
+  CampaignTargetStatus.WAITING_REPLY,
+]);
 
 @Injectable()
 export class CampaignsService {
@@ -462,6 +475,32 @@ export class CampaignsService {
     });
   }
 
+  async markTargetReplied(conversationId: string) {
+    const target = await this.findTargetByConversationId(conversationId);
+    if (!target || target.repliedAt) return target;
+    return this.prisma.$transaction(async (tx) => {
+      const current = await tx.campaignTarget.findUnique({
+        where: { id: target.id },
+      });
+      if (!current || current.repliedAt) return current;
+      const status = TARGET_OUTCOME_PRIORITY.has(current.status)
+        ? current.status
+        : CampaignTargetStatus.REPLIED;
+      const updated = await tx.campaignTarget.update({
+        where: { id: current.id },
+        data: {
+          status,
+          repliedAt: new Date(),
+          completedAt: current.completedAt ?? new Date(),
+          errorMessage:
+            status === CampaignTargetStatus.REPLIED ? null : undefined,
+        },
+      });
+      await this.recalculateCounters(tx, current.campaignId);
+      return updated;
+    });
+  }
+
   attachConversation(targetId: string, conversationId: string) {
     return this.prisma.campaignTarget.update({
       where: { id: targetId },
@@ -525,29 +564,35 @@ export class CampaignsService {
   ) {
     const target = await this.findTarget(campaignId, targetId);
     const now = new Date();
+    const currentPriority = TARGET_OUTCOME_PRIORITY.get(target.status) ?? 0;
+    const requestedPriority = TARGET_OUTCOME_PRIORITY.get(data.status) ?? 0;
+    const nextStatus =
+      currentPriority > 0 && requestedPriority < currentPriority
+        ? target.status
+        : data.status;
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.campaignTarget.update({
         where: { id: targetId },
         data: {
-          status: data.status,
+          status: nextStatus,
           errorMessage:
-            data.status === CampaignTargetStatus.ERROR
+            nextStatus === CampaignTargetStatus.ERROR
               ? data.errorMessage
               : null,
-          ...(data.status === CampaignTargetStatus.QUEUED
+          ...(nextStatus === CampaignTargetStatus.QUEUED
             ? { queuedAt: now }
             : {}),
-          ...(data.status === CampaignTargetStatus.PROCESSING
+          ...(nextStatus === CampaignTargetStatus.PROCESSING
             ? { processingStartedAt: now }
             : {}),
-          ...(data.status === CampaignTargetStatus.MESSAGE_SENT ||
-          data.status === CampaignTargetStatus.WAITING_REPLY
+          ...(nextStatus === CampaignTargetStatus.MESSAGE_SENT ||
+          nextStatus === CampaignTargetStatus.WAITING_REPLY
             ? { messageSentAt: now }
             : {}),
-          ...(REPLIED_TARGET_STATUSES.has(data.status)
+          ...(REPLIED_TARGET_STATUSES.has(nextStatus)
             ? { repliedAt: now }
             : {}),
-          ...(PROCESSED_TARGET_STATUSES.has(data.status)
+          ...(PROCESSED_TARGET_STATUSES.has(nextStatus)
             ? { completedAt: now }
             : {}),
         },
@@ -562,7 +607,7 @@ export class CampaignsService {
         { targetId },
         targetId,
         target.status,
-        data.status,
+        nextStatus,
       );
       return updated;
     });
@@ -663,17 +708,26 @@ export class CampaignsService {
       );
     const exact = (status: CampaignTargetStatus) =>
       grouped.find((item) => item.status === status)?._count._all ?? 0;
+    const repliedCount = await tx.campaignTarget.count({
+      where: { campaignId, repliedAt: { not: null } },
+    });
     await tx.campaign.update({
       where: { id: campaignId },
       data: {
         selectedCount: grouped.reduce((sum, item) => sum + item._count._all, 0),
         processedCount: count(PROCESSED_TARGET_STATUSES),
-        repliedCount: count(REPLIED_TARGET_STATUSES),
+        repliedCount,
         leadCount: exact(CampaignTargetStatus.LEAD),
         rejectedCount: exact(CampaignTargetStatus.REJECTED),
         handoffCount: exact(CampaignTargetStatus.HANDOFF),
       },
     });
+    if (count(OPEN_TARGET_STATUSES) === 0) {
+      await tx.campaign.updateMany({
+        where: { id: campaignId, status: CampaignStatus.RUNNING },
+        data: { status: CampaignStatus.COMPLETED, finishedAt: new Date() },
+      });
+    }
   }
 
   private validateSettings(settings: {

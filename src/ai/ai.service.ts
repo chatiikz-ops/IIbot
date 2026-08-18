@@ -10,6 +10,7 @@ import {
 import { Prisma } from '../generated/prisma/client';
 import { ConversationStatus, MessageRole } from '../generated/prisma/enums';
 import { PrismaService } from '../prisma/prisma.service';
+import { isTerminalConversationStatus } from '../conversations/conversation-status';
 import { AiConfigService } from './ai-config.service';
 import { AiDecisionService } from './ai-decision.service';
 import { AiPromptBuilderService } from './ai-prompt-builder.service';
@@ -99,8 +100,10 @@ export class AiService {
     if (conversation.contact.deletedAt) {
       throw new ForbiddenException('Контакт удалён');
     }
-    if (conversation.status === ConversationStatus.CLOSED) {
-      throw new ConflictException('Разговор закрыт');
+    if (isTerminalConversationStatus(conversation.status)) {
+      throw new ConflictException(
+        `Автоматизация запрещена для диалога ${conversation.status}`,
+      );
     }
     const message = await this.prisma.message.findFirst({
       where: { id: clientMessageId, conversationId, role: MessageRole.CLIENT },

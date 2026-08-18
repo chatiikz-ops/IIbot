@@ -1,6 +1,7 @@
 export const IMPORT_FIELDS = [
   'companyName',
   'phone',
+  'whatsapp',
   'city',
   'category',
   'website',
@@ -22,6 +23,9 @@ export type RawImportRow = Record<string, string | null>;
 export type NormalizedContactData = {
   companyName: string;
   phone: string;
+  whatsapp: string | null;
+  phoneSource: 'PHONE' | 'WHATSAPP';
+  extraPhones: string[];
   city: string | null;
   category: string | null;
   website: string | null;

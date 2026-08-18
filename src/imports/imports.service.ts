@@ -9,7 +9,10 @@ import {
 import { ClassificationService } from '../classification/classification.service';
 import { ImportRowStatus, ImportStatus } from '../generated/prisma/enums';
 import { Prisma } from '../generated/prisma/client';
-import { normalizePhone } from '../common/utils/phone.util';
+import {
+  normalizePhone,
+  normalizeWhatsAppPhone,
+} from '../common/utils/phone.util';
 import {
   normalizeHttpUrl,
   normalizeInstagram,
@@ -25,7 +28,10 @@ import {
   type NormalizedContactData,
   type RawImportRow,
 } from './imports.types';
-import { detectColumnMapping } from './utils/column-mapping.util';
+import {
+  detectColumnMapping,
+  detectSourceProfile,
+} from './utils/column-mapping.util';
 import { parseSpreadsheet } from './utils/spreadsheet.util';
 
 type SourceRow = { rowNumber: number; rawData: RawImportRow };
@@ -80,6 +86,7 @@ export class ImportsService {
       mapping: detected.mapping,
       unmappedColumns: detected.unmappedColumns,
       ambiguousColumns: detected.ambiguousColumns,
+      sourceProfile: detected.sourceProfile,
       summary: { total: processed.length, ...counts },
       previewRows: processed.slice(0, 20),
     };
@@ -220,7 +227,7 @@ export class ImportsService {
         'Не удалось определить колонку с названием компании',
       );
     }
-    if (!Object.values(mapping).includes('phone')) {
+    if (!this.hasPhoneMapping(mapping)) {
       throw new BadRequestException(
         'Не удалось определить колонку с телефоном',
       );
@@ -266,7 +273,17 @@ export class ImportsService {
           if (rowsToCreate.length > 0) {
             const created = await tx.contact.createManyAndReturn({
               data: rowsToCreate.map(({ row, data }) => ({
-                ...data,
+                companyName: data.companyName,
+                phone: data.phone,
+                city: data.city,
+                category: data.category,
+                website: data.website,
+                instagram: data.instagram,
+                twoGisUrl: data.twoGisUrl,
+                bookingUrl: data.bookingUrl,
+                email: data.email,
+                address: data.address,
+                notes: data.notes,
                 rawData: row.rawData as Prisma.InputJsonValue,
               })),
               select: { id: true, phone: true },
@@ -385,15 +402,30 @@ export class ImportsService {
   private normalizeRow(row: SourceRow, mapping: ColumnMapping) {
     const mapped = Object.fromEntries(
       Object.entries(mapping)
-        .filter(([, field]) => field !== 'ignore')
+        .filter(([, field]) => !['ignore', 'phone', 'whatsapp'].includes(field))
         .map(([header, field]) => [field, this.text(row.rawData[header])]),
     ) as Partial<Record<ImportField, string | null>>;
+    const valuesFor = (field: ImportField) =>
+      Object.entries(mapping)
+        .filter(([, mappedField]) => mappedField === field)
+        .map(([header]) => this.text(row.rawData[header]))
+        .filter((value): value is string => Boolean(value));
+    const rawPhones = valuesFor('phone');
+    const rawWhatsApps = valuesFor('whatsapp');
+    const phones = rawPhones
+      .map(normalizePhone)
+      .filter((value): value is string => Boolean(value));
+    const whatsApps = rawWhatsApps
+      .map(normalizeWhatsAppPhone)
+      .filter((value): value is string => Boolean(value));
     const errors: string[] = [];
     const companyName = mapped.companyName ?? null;
-    const phone = mapped.phone ? normalizePhone(mapped.phone) : null;
+    const phone = phones[0] ?? whatsApps[0] ?? null;
+    const whatsapp = whatsApps[0] ?? null;
 
     if (!companyName) errors.push('Не указано название компании');
-    if (!mapped.phone) errors.push('Не указан телефон');
+    if (rawPhones.length === 0 && rawWhatsApps.length === 0)
+      errors.push('Не найден телефон');
     else if (!phone) errors.push('Некорректный номер телефона');
 
     const website = this.normalizeUrl(mapped.website, 'website', errors);
@@ -410,6 +442,14 @@ export class ImportsService {
         ? {
             companyName,
             phone,
+            whatsapp,
+            phoneSource: phones[0] ? ('PHONE' as const) : ('WHATSAPP' as const),
+            extraPhones: [
+              ...new Set([
+                ...phones.slice(1),
+                ...whatsApps.filter((value) => value !== phone),
+              ]),
+            ],
             city: mapped.city ?? null,
             category: mapped.category ?? null,
             website,
@@ -459,7 +499,12 @@ export class ImportsService {
       ) {
         throw new BadRequestException('Сопоставление колонок содержит ошибки');
       }
-      if (field !== 'ignore' && used.has(field)) {
+      if (
+        field !== 'ignore' &&
+        used.has(field) &&
+        field !== 'phone' &&
+        field !== 'whatsapp'
+      ) {
         throw new BadRequestException('Сопоставление колонок содержит ошибки');
       }
       if (field !== 'ignore') used.add(field);
@@ -485,6 +530,7 @@ export class ImportsService {
       mapping,
       unmappedColumns: headers.filter((header) => !mapping[header]),
       ambiguousColumns: [],
+      sourceProfile: detectSourceProfile(headers),
       summary: { total: job.totalRows, ...counts },
       previewRows: job.rows,
     };
@@ -564,7 +610,12 @@ export class ImportsService {
 
   private hasRequiredMapping(mapping: ColumnMapping) {
     const values = Object.values(mapping);
-    return values.includes('companyName') && values.includes('phone');
+    return values.includes('companyName') && this.hasPhoneMapping(mapping);
+  }
+
+  private hasPhoneMapping(mapping: ColumnMapping) {
+    const values = Object.values(mapping);
+    return values.includes('phone') || values.includes('whatsapp');
   }
 
   private text(value: string | null | undefined) {

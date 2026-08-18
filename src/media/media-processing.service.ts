@@ -9,6 +9,7 @@ import {
   MediaType,
   MessageRole,
 } from '../generated/prisma/enums';
+import { isTerminalConversationStatus } from '../conversations/conversation-status';
 import { PrismaService } from '../prisma/prisma.service';
 import { TelegramNotificationsService } from '../telegram/telegram-notifications.service';
 import { AudioTranscriptionService } from './audio-transcription.service';
@@ -308,10 +309,9 @@ export class MediaProcessingService implements OnApplicationShutdown {
         await tx.conversation.update({
           where: { id: input.conversationId },
           data: {
-            status:
-              conversation.status === ConversationStatus.HANDOFF_REQUIRED
-                ? ConversationStatus.HANDOFF_REQUIRED
-                : ConversationStatus.ACTIVE,
+            status: isTerminalConversationStatus(conversation.status)
+              ? conversation.status
+              : ConversationStatus.ACTIVE,
             lastMessageAt: message.createdAt,
             messageCount: { increment: 1 },
           },

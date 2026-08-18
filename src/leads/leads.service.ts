@@ -26,6 +26,13 @@ export class LeadsService {
         if (conversation.lead) {
           throw new ConflictException('Лид для этого разговора уже существует');
         }
+        const contactLead = await tx.lead.findFirst({
+          where: { contactId: conversation.contactId },
+          select: { id: true },
+        });
+        if (contactLead) {
+          throw new ConflictException('Лид для этого контакта уже существует');
+        }
 
         const lead = await tx.lead.create({
           data: {
@@ -49,7 +56,7 @@ export class LeadsService {
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        throw new ConflictException('Лид для этого разговора уже существует');
+        throw new ConflictException('Лид для этого контакта уже существует');
       }
       throw error;
     }

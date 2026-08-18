@@ -6,6 +6,7 @@ import {
 import { Prisma } from '../generated/prisma/client';
 import { ConversationStatus, MessageRole } from '../generated/prisma/enums';
 import { PrismaService } from '../prisma/prisma.service';
+import { isTerminalConversationStatus } from '../conversations/conversation-status';
 import type { CreateMessageDto } from './dto/create-message.dto';
 import type { MessagesQueryDto } from './dto/messages-query.dto';
 
@@ -38,7 +39,8 @@ export class MessagesService {
         data: {
           messageCount: { increment: 1 },
           lastMessageAt: message.createdAt,
-          ...(conversation.messageCount === 0
+          ...(conversation.messageCount === 0 &&
+          !isTerminalConversationStatus(conversation.status)
             ? { status: ConversationStatus.ACTIVE }
             : {}),
         },

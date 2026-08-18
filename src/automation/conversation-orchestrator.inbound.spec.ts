@@ -95,6 +95,7 @@ describe('ConversationOrchestrator inbound replies', () => {
     ),
   };
   const campaigns = {
+    markTargetReplied: jest.fn(() => Promise.resolve(null)),
     findTargetByConversationId: jest.fn(() => Promise.resolve(null)),
     findTargetById: jest.fn(),
     updateTargetStatus: jest.fn(() => Promise.resolve({})),
@@ -246,6 +247,26 @@ describe('ConversationOrchestrator inbound replies', () => {
     );
   });
 
+  it.each(['QUALIFIED', 'REJECTED', 'CLOSED'])(
+    'does not run AI for terminal conversation %s',
+    async (status) => {
+      conversations.findOne.mockResolvedValueOnce({
+        id: input.conversationId,
+        contactId: input.contactId,
+        status,
+        strategyCode: 'BARBERSHOP_GENERAL',
+      });
+
+      await service.handleIncomingClientMessage(input);
+
+      expect(campaigns.markTargetReplied).toHaveBeenCalledWith(
+        input.conversationId,
+      );
+      expect(delay.scheduleConversation).not.toHaveBeenCalled();
+      expect(ai.processClientMessage).not.toHaveBeenCalled();
+    },
+  );
+
   it('preserves the Campaign strategy on an existing conversation', async () => {
     campaigns.findTargetById.mockResolvedValue({
       id: 'target-1',
@@ -331,6 +352,33 @@ describe('ConversationOrchestrator inbound replies', () => {
     });
 
     expect(ai.processClientMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists qualification outcome before a WhatsApp transport failure', async () => {
+    ai.processClientMessage.mockResolvedValueOnce({
+      run: { id: 'ai-run-qualified' },
+      message: { id: 'ai-message-qualified', text: 'Спасибо' },
+      result: { action: 'QUALIFY', leadDecision: 'QUALIFIED' },
+      lead: { id: 'lead-1' },
+    });
+    campaigns.findTargetByConversationId.mockResolvedValueOnce({
+      id: 'target-1',
+      campaignId: 'campaign-1',
+    });
+    whatsapp.sendAiMessage.mockRejectedValueOnce(new Error('transport'));
+
+    await expect(
+      service.processIncomingClientMessage(input),
+    ).rejects.toMatchObject({ code: 'WHATSAPP_SEND_OUTCOME_UNKNOWN' });
+
+    expect(campaigns.updateTargetStatus).toHaveBeenCalledWith(
+      'campaign-1',
+      'target-1',
+      { status: 'LEAD' },
+    );
+    expect(
+      campaigns.updateTargetStatus.mock.invocationCallOrder[0],
+    ).toBeLessThan(whatsapp.sendAiMessage.mock.invocationCallOrder[0]);
   });
 
   it('defers outside working hours by creating a real next-window job', async () => {

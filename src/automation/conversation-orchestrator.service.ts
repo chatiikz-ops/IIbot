@@ -9,6 +9,7 @@ import { AiService } from '../ai/ai.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { ContactsService } from '../contacts/contacts.service';
 import { ConversationsService } from '../conversations/conversations.service';
+import { isTerminalConversationStatus } from '../conversations/conversation-status';
 import {
   AutomationEventType,
   CampaignStatus,
@@ -31,13 +32,6 @@ import { campaignWindow } from './campaign-time.util';
 import { AutomationEventsService } from './automation-events.service';
 import { AutomationSettingsService } from './automation-settings.service';
 import { AutomationJobError } from './automation-job.error';
-
-const TERMINAL_CONVERSATION_STATUSES: ConversationStatus[] = [
-  ConversationStatus.CLOSED,
-  ConversationStatus.REJECTED,
-  ConversationStatus.QUALIFIED,
-  ConversationStatus.HANDOFF_REQUIRED,
-];
 
 const STARTABLE_TARGET_STATUSES: CampaignTargetStatus[] = [
   CampaignTargetStatus.WAITING,
@@ -96,6 +90,8 @@ export class ConversationOrchestratorService {
       messageId: input.messageId,
       whatsAppMessageId: input.whatsAppMessageId,
     });
+
+    await this.campaigns.markTargetReplied(input.conversationId);
 
     const settings = await this.settings.get();
     if (!settings.enabled) {
@@ -472,6 +468,9 @@ export class ConversationOrchestratorService {
       });
     }
 
+    await this.recordDecisionEvent(input, result);
+    await this.syncCampaignTarget(input.conversationId, result);
+
     if (result.message) {
       const contact = await this.contacts.findOne(input.contactId);
       try {
@@ -524,9 +523,6 @@ export class ConversationOrchestratorService {
         );
       }
     }
-
-    await this.recordDecisionEvent(input, result);
-    await this.syncCampaignTarget(input.conversationId, result);
   }
 
   private async sendFollowUp(
@@ -618,7 +614,7 @@ export class ConversationOrchestratorService {
       const conversation = await this.conversations.findOne(
         input.conversationId,
       );
-      if (TERMINAL_CONVERSATION_STATUSES.includes(conversation.status)) {
+      if (isTerminalConversationStatus(conversation.status)) {
         return this.skip(
           input,
           conversation.status === ConversationStatus.HANDOFF_REQUIRED

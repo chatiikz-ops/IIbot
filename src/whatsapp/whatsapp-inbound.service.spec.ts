@@ -172,6 +172,25 @@ describe('WhatsApp inbound pipeline', () => {
     expect(localMessages[0]?.conversationId).toBe(conversation.id);
   });
 
+  it.each<string>(['QUALIFIED', 'HANDOFF_REQUIRED', 'REJECTED', 'CLOSED'])(
+    'stores inbound in the same %s conversation without downgrading it',
+    async (status) => {
+      tx.conversation.findFirst.mockResolvedValueOnce({
+        ...conversation,
+        status,
+      });
+
+      await service.handleInbound(inbound());
+
+      expect(tx.conversation.create).not.toHaveBeenCalled();
+      expect(localMessages[0]?.conversationId).toBe(conversation.id);
+      expect(conversationUpdate).toHaveBeenCalledWith({
+        where: { id: conversation.id },
+        data: expect.objectContaining({ status }) as unknown,
+      });
+    },
+  );
+
   it('ignores own outbound messages', async () => {
     await service.handleInbound(inbound({ fromMe: true }));
 

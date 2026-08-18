@@ -1,34 +1,59 @@
 import { detectColumnMapping } from './column-mapping.util';
 
 describe('detectColumnMapping', () => {
-  it('supports production Russian aliases including Заметки', () => {
+  it('detects a production 2GIS export without confusing phone and WhatsApp', () => {
     const result = detectColumnMapping([
-      'Название салона',
-      'WhatsApp',
-      'Город',
-      'Тип бизнеса',
-      '2ГИС',
-      'Ссылка записи',
-      'Почта',
-      'Адрес',
-      'Заметки',
+      'Наименование',
+      'Рубрики',
+      'Телефон 1',
+      'Телефон 2',
+      'Веб-сайт 1',
+      'WhatsApp 1',
     ]);
-    expect(result.mapping).toMatchObject({
-      'Название салона': 'companyName',
-      WhatsApp: 'phone',
+    expect(result).toMatchObject({
+      sourceProfile: '2GIS',
+      mapping: {
+        Наименование: 'companyName',
+        Рубрики: 'category',
+        'Телефон 1': 'phone',
+        'Телефон 2': 'phone',
+        'Веб-сайт 1': 'website',
+        'WhatsApp 1': 'whatsapp',
+      },
+      ambiguousColumns: [],
+    });
+  });
+
+  it('keeps the legacy Excel aliases compatible', () => {
+    expect(
+      detectColumnMapping([
+        'Название',
+        'Телефон',
+        'Город',
+        'Категория',
+        'Заметки',
+      ]).mapping,
+    ).toEqual({
+      Название: 'companyName',
+      Телефон: 'phone',
       Город: 'city',
-      'Тип бизнеса': 'category',
-      '2ГИС': 'twoGisUrl',
-      'Ссылка записи': 'bookingUrl',
-      Почта: 'email',
-      Адрес: 'address',
+      Категория: 'category',
       Заметки: 'notes',
     });
   });
 
-  it('does not silently map a second column to an already used field', () => {
-    const result = detectColumnMapping(['Телефон', 'Номер']);
-    expect(Object.values(result.mapping)).toEqual(['phone']);
-    expect(result.ambiguousColumns).toEqual(['Номер']);
+  it('normalizes case, spaces, ё, underscores and numeric suffixes', () => {
+    const result = detectColumnMapping([
+      '  НАЗВАНИЕ   КОМПАНИИ ',
+      'населённый_пункт',
+      'phone-2',
+      'WHATS APP 1',
+    ]);
+    expect(result.mapping).toMatchObject({
+      '  НАЗВАНИЕ   КОМПАНИИ ': 'companyName',
+      населённый_пункт: 'city',
+      'phone-2': 'phone',
+      'WHATS APP 1': 'whatsapp',
+    });
   });
 });
