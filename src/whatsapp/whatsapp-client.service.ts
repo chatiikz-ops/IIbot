@@ -53,12 +53,14 @@ export class WhatsAppClientService
   private readonly ackHandlers: AckHandler[] = [];
   private generation = 0;
   private readyGeneration = 0;
+  private readyEventGeneration = 0;
   private disconnectedGeneration = 0;
   private initializationWaiter: {
     generation: number;
     resolve: (outcome: InitializationOutcome) => void;
   } | null = null;
   private readonly boundClients = new WeakSet<Client>();
+  private lifecycleEventQueue: Promise<void> = Promise.resolve();
   private ownsRuntimeLock = false;
 
   constructor(
@@ -215,9 +217,28 @@ export class WhatsAppClientService
   }
 
   async getStatus() {
-    const session = await this.prisma.whatsAppSession.findUnique({
+    let session = await this.prisma.whatsAppSession.findUnique({
       where: { clientId: this.config.clientId },
     });
+    if (
+      this.lifecycleState === 'READY' &&
+      this.client &&
+      (this.status !== WhatsAppConnectionStatus.CONNECTED ||
+        session?.status !== WhatsAppConnectionStatus.CONNECTED)
+    ) {
+      this.logger.warn({
+        event: 'WHATSAPP_STATE_INVARIANT_VIOLATION',
+        clientInstanceId: `${this.config.clientId}:${this.generation}`,
+        generation: this.generation,
+        lifecycleState: this.lifecycleState,
+        runtimeStatus: this.status,
+        persistedStatus: session?.status ?? null,
+      });
+      await this.setStatus(WhatsAppConnectionStatus.CONNECTED);
+      session = await this.prisma.whatsAppSession.findUnique({
+        where: { clientId: this.config.clientId },
+      });
+    }
     const qrAvailable = this.isQrAvailable();
     const status = qrAvailable
       ? WhatsAppConnectionStatus.QR_REQUIRED
@@ -577,22 +598,23 @@ export class WhatsAppClientService
     if (this.boundClients.has(client)) return;
     this.boundClients.add(client);
     client.on('qr', (rawQr) => {
-      void this.safeEvent(client, generation, () =>
+      this.enqueueLifecycleEvent(client, generation, () =>
         this.handleQr(client, generation, rawQr),
       );
     });
     client.on('authenticated', () => {
-      void this.safeEvent(client, generation, () =>
-        this.setStatus(WhatsAppConnectionStatus.AUTHENTICATING),
+      this.enqueueLifecycleEvent(client, generation, () =>
+        this.handleAuthenticated(client, generation),
       );
     });
     client.on('ready', () => {
-      void this.safeEvent(client, generation, () =>
+      this.enqueueLifecycleEvent(client, generation, () =>
         this.handleReady(client, generation),
       );
     });
     client.on('auth_failure', () => {
-      void this.safeEvent(client, generation, async () => {
+      this.enqueueLifecycleEvent(client, generation, async () => {
+        if (this.readyEventGeneration === generation) return;
         this.lifecycleState = 'FAILED';
         this.clearQr();
         await this.setStatus(WhatsAppConnectionStatus.AUTH_FAILURE, {
@@ -601,7 +623,7 @@ export class WhatsAppClientService
       });
     });
     client.on('disconnected', () => {
-      void this.safeEvent(client, generation, () =>
+      this.enqueueLifecycleEvent(client, generation, () =>
         this.handleDisconnected(generation),
       );
     });
@@ -659,21 +681,36 @@ export class WhatsAppClientService
   }
 
   private async handleReady(client: Client, generation: number) {
-    if (this.readyGeneration === generation) return;
-    this.readyGeneration = generation;
-    this.lifecycleState = 'READY';
+    if (this.readyEventGeneration === generation) return;
+    this.readyEventGeneration = generation;
     this.clearQr();
+    const lastConnectedAt = new Date();
     const phoneNumber = client.info?.wid?.user
       ? `+${client.info.wid.user}`
       : null;
     await this.setStatus(WhatsAppConnectionStatus.CONNECTED, {
       phoneNumber,
       displayName: client.info?.pushname ?? null,
-      lastConnectedAt: new Date(),
+      lastConnectedAt,
       lastError: null,
     });
+    this.readyGeneration = generation;
+    this.lifecycleState = 'READY';
     this.resolveInitialization(generation, 'READY');
     this.logLifecycle('connected', generation);
+  }
+
+  private async handleAuthenticated(client: Client, generation: number) {
+    if (
+      this.client !== client ||
+      this.generation !== generation ||
+      this.readyGeneration === generation ||
+      this.readyEventGeneration === generation ||
+      this.lifecycleState === 'READY'
+    ) {
+      return;
+    }
+    await this.setStatus(WhatsAppConnectionStatus.AUTHENTICATING);
   }
 
   private async handleDisconnected(generation: number) {
@@ -747,18 +784,31 @@ export class WhatsAppClientService
       lastError?: string | null;
     } = {},
   ) {
-    this.status = status;
     const update = this.prisma.whatsAppSession.upsert({
       where: { clientId: this.config.clientId },
       create: { clientId: this.config.clientId, status, ...data },
       update: { status, ...data },
     });
-    return update.then(() => undefined);
+    return update.then(() => {
+      this.status = status;
+    });
+  }
+
+  private enqueueLifecycleEvent(
+    client: Client,
+    generation: number,
+    operation: () => Promise<void>,
+  ) {
+    const queued = this.lifecycleEventQueue.then(() =>
+      this.safeEvent(client, generation, operation),
+    );
+    this.lifecycleEventQueue = queued.catch(() => undefined);
   }
 
   private waitForInitializationOutcome(generation: number) {
     return new Promise<InitializationOutcome>((resolve) => {
       const timeout = setTimeout(() => {
+        if (this.readyEventGeneration === generation) return;
         if (this.initializationWaiter?.generation === generation) {
           this.initializationWaiter = null;
         }

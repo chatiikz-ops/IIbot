@@ -150,6 +150,62 @@ describe('WhatsAppClientService lifecycle', () => {
     expect(connectedWrites).toHaveLength(1);
   });
 
+  it('transitions authenticated -> ready to a fully connected state', async () => {
+    const operation = service.initialize();
+    await tick();
+    clients[0].emit('authenticated');
+    await tick();
+    await expect(service.getStatus()).resolves.toMatchObject({
+      status: WhatsAppConnectionStatus.AUTHENTICATING,
+      connected: false,
+    });
+
+    await ready();
+    await operation;
+
+    await expect(service.getStatus()).resolves.toMatchObject({
+      status: WhatsAppConnectionStatus.CONNECTED,
+      connected: true,
+      lifecycleState: 'READY',
+      phoneNumber: '+77001234567',
+      displayName: 'Test',
+      qrAvailable: false,
+      lastError: null,
+    });
+    expect(session.lastConnectedAt).toBeInstanceOf(Date);
+  });
+
+  it('ignores authenticated events that arrive after ready', async () => {
+    const operation = service.initialize();
+    await ready();
+    await operation;
+    clients[0].emit('authenticated');
+    await tick();
+
+    await expect(service.getStatus()).resolves.toMatchObject({
+      status: WhatsAppConnectionStatus.CONNECTED,
+      connected: true,
+      lifecycleState: 'READY',
+    });
+    expect(session.status).toBe(WhatsAppConnectionStatus.CONNECTED);
+  });
+
+  it('resolves initialization immediately when ready is received', async () => {
+    const operation = service.initialize();
+    await tick();
+    clients[0].emit('authenticated');
+    clients[0].emit('ready');
+
+    await expect(
+      Promise.race([
+        operation.then(() => 'resolved'),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('still-pending'), 50),
+        ),
+      ]),
+    ).resolves.toBe('resolved');
+  });
+
   it('handles repeated disconnected idempotently', async () => {
     const operation = service.initialize();
     await ready();
