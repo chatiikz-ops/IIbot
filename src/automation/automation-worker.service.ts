@@ -322,6 +322,7 @@ export class AutomationWorkerService
           return;
         }
       }
+
       await this.prisma.automationJob.update({
         where: { id: job.id },
         data: {
@@ -333,6 +334,7 @@ export class AutomationWorkerService
           errorCode: null,
         },
       });
+
       if (job.type === AutomationJobType.CAMPAIGN_TARGET) {
         this.logger.log({
           event: 'CAMPAIGN_TARGET_COMPLETED',
@@ -341,6 +343,7 @@ export class AutomationWorkerService
           targetId: job.campaignTargetId,
         });
       }
+
       const createdAtMs = new Date(job.createdAt).getTime();
       this.logger.log({
         event:
@@ -357,12 +360,50 @@ export class AutomationWorkerService
         error instanceof AutomationJobError && error.kind === 'TERMINAL';
       const terminalFailure = this.isTerminalFailure(error);
       const exhausted = job.attempts >= job.maxAttempts;
+
       const status = terminalCancellation
         ? AutomationJobStatus.CANCELLED
         : terminalFailure || exhausted
           ? AutomationJobStatus.FAILED
           : AutomationJobStatus.PENDING;
+
       const backoff = job.attempts <= 1 ? 15_000 : 60_000;
+
+      if (
+        job.type === AutomationJobType.CAMPAIGN_TARGET &&
+        job.campaignTargetId &&
+        status === AutomationJobStatus.PENDING
+      ) {
+        await this.prisma.campaignTarget.updateMany({
+          where: {
+            id: job.campaignTargetId,
+            status: CampaignTargetStatus.PROCESSING,
+            messageSentAt: null,
+          },
+          data: {
+            status: CampaignTargetStatus.QUEUED,
+          },
+        });
+      }
+
+      if (
+        job.type === AutomationJobType.CAMPAIGN_TARGET &&
+        job.campaignTargetId &&
+        status === AutomationJobStatus.FAILED
+      ) {
+        await this.prisma.campaignTarget.updateMany({
+          where: {
+            id: job.campaignTargetId,
+            status: CampaignTargetStatus.PROCESSING,
+            messageSentAt: null,
+          },
+          data: {
+            status: CampaignTargetStatus.ERROR,
+            errorMessage: this.errorMessage(error).slice(0, 1000),
+          },
+        });
+      }
+
       await this.prisma.automationJob.update({
         where: { id: job.id },
         data: {
@@ -379,6 +420,7 @@ export class AutomationWorkerService
             status === AutomationJobStatus.CANCELLED ? new Date() : undefined,
         },
       });
+
       this.logger.warn({
         event:
           job.type === AutomationJobType.CAMPAIGN_TARGET
@@ -454,13 +496,7 @@ export class AutomationWorkerService
       take: 50,
     });
     for (const [index, target] of targets.entries()) {
-      const settings = target.campaign.settings!;
-      const delay =
-        settings.minDelaySeconds +
-        Math.floor(
-          Math.random() *
-            (settings.maxDelaySeconds - settings.minDelaySeconds + 1),
-        );
+      
       await this.prisma.automationJob.upsert({
         where: { deduplicationKey: `campaign-target:${target.id}` },
         create: {
@@ -468,9 +504,7 @@ export class AutomationWorkerService
           // Spread otherwise-identical runAt values so a full pool does not
           // dispatch all outbound messages in the same millisecond.
           runAt: new Date(
-            Date.now() +
-              delay * 1000 +
-              (index % this.campaignConcurrency) * 100,
+            Date.now() + (index % this.campaignConcurrency) * 100,
           ),
           contactId: target.contactId,
           campaignId: target.campaignId,
