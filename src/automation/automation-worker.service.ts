@@ -497,22 +497,42 @@ export class AutomationWorkerService
     });
     for (const [index, target] of targets.entries()) {
       
-      await this.prisma.automationJob.upsert({
-        where: { deduplicationKey: `campaign-target:${target.id}` },
-        create: {
-          type: AutomationJobType.CAMPAIGN_TARGET,
-          // Spread otherwise-identical runAt values so a full pool does not
-          // dispatch all outbound messages in the same millisecond.
-          runAt: new Date(
-            Date.now() + (index % this.campaignConcurrency) * 100,
-          ),
-          contactId: target.contactId,
-          campaignId: target.campaignId,
-          campaignTargetId: target.id,
-          deduplicationKey: `campaign-target:${target.id}`,
-        },
-        update: {},
-      });
+      const runAt = new Date(
+  Date.now() + (index % this.campaignConcurrency) * 100,
+);
+
+await this.prisma.automationJob.upsert({
+  where: {
+    deduplicationKey: `campaign-target:${target.id}`,
+  },
+
+  create: {
+    type: AutomationJobType.CAMPAIGN_TARGET,
+    status: AutomationJobStatus.PENDING,
+    runAt,
+
+    contactId: target.contactId,
+    campaignId: target.campaignId,
+    campaignTargetId: target.id,
+
+    deduplicationKey: `campaign-target:${target.id}`,
+  },
+
+  update: {
+    status: AutomationJobStatus.PENDING,
+    runAt,
+
+    attempts: 0,
+
+    lockedAt: null,
+    lockedBy: null,
+
+    lastError: null,
+    errorCode: null,
+
+    completedAt: null,
+  },
+});
       await this.prisma.campaignTarget.updateMany({
         where: {
           id: target.id,
