@@ -25,7 +25,8 @@ export type ProviderFailureMetadata = {
   outputTokens: number | null;
   reasoningTokens: number | null;
   totalTokens: number | null;
-  validationFailure?: 'EMPTY_OUTPUT' | 'INVALID_JSON' | 'SCHEMA_VALIDATION';
+  validationFailure?:
+    'EMPTY_OUTPUT' | 'PARSED_OUTPUT_MISSING' | 'SCHEMA_VALIDATION';
   schemaIssues?: Array<{ code: string; path: string; message: string }>;
   decisionSnapshot?: {
     action: unknown;
@@ -98,7 +99,9 @@ export class OpenAiService {
         return { ...result, attempts: attempt + 1 };
       } catch (error) {
         lastError = error;
-        const retryable = error instanceof AiProviderError && error.retryable;
+        const retryable =
+          error instanceof ZodError ||
+          (error instanceof AiProviderError && error.retryable);
         if (error instanceof AiProviderError) error.attempts = attempt + 1;
         this.logger.warn({
           event: 'OPENAI_ATTEMPT_FAILED',
@@ -138,7 +141,7 @@ export class OpenAiService {
     });
 
     try {
-      const response = await client.responses.create({
+      const response = await client.responses.parse({
         model: this.config.providerModel,
         instructions: systemPrompt,
         input,
@@ -159,14 +162,12 @@ export class OpenAiService {
           attempts: 1,
         };
       }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(response.output_text) as unknown;
-      } catch {
+      const parsed: unknown = response.output_parsed;
+      if (!parsed) {
         const metadata = {
           ...this.failureMetadata(response),
           validationFailure: response.output_text
-            ? ('INVALID_JSON' as const)
+            ? ('PARSED_OUTPUT_MISSING' as const)
             : ('EMPTY_OUTPUT' as const),
         };
         this.logger.warn({
@@ -176,7 +177,7 @@ export class OpenAiService {
         throw new AiProviderError(
           'INVALID_OUTPUT',
           'OpenAI did not return a parsed structured result',
-          false,
+          true,
           1,
           metadata,
         );
@@ -200,7 +201,7 @@ export class OpenAiService {
         throw new AiProviderError(
           'INVALID_OUTPUT',
           'OpenAI structured result failed schema validation',
-          false,
+          true,
           1,
           metadata,
         );

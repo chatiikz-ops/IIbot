@@ -17,7 +17,7 @@ describe('OpenAiService latency policy', () => {
     });
   });
 
-  it('does not retry invalid structured output', async () => {
+  it('retries invalid structured output once and then fails boundedly', async () => {
     const service = new OpenAiService({
       maxRetries: 1,
       mockMode: true,
@@ -28,7 +28,7 @@ describe('OpenAiService latency policy', () => {
     ).rejects.toMatchObject({
       code: 'INVALID_OUTPUT',
       retryable: false,
-      attempts: 1,
+      attempts: 2,
     });
   });
 });

@@ -1,6 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
-  BusinessType,
   CrmProvider,
   ImportRowStatus,
   OutreachSkipReason,
@@ -13,6 +12,7 @@ import {
   determineStrategy,
 } from './utils/classification.util';
 import { extractDomain, extractDomains } from './utils/domain.util';
+import { SYSTEM_STRATEGY_CODES } from '../prompt-strategies/prompt-strategies.constants';
 
 @Injectable()
 export class ClassificationService {
@@ -50,78 +50,131 @@ export class ClassificationService {
   }
 
   async classifyAll(force = false) {
-    const contacts = await this.prisma.contact.findMany({
-      where: force
-        ? { deletedAt: null }
-        : { classifiedAt: null, deletedAt: null },
-      select: { id: true },
-    });
-    return this.classifyContactIds(contacts.map(({ id }) => id));
+    const totals: Array<{ processed: number }> = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const contacts = await this.prisma.contact.findMany({
+        where: force
+          ? { deletedAt: null }
+          : { classifiedAt: null, deletedAt: null },
+        select: { id: true },
+        orderBy: { id: 'asc' },
+        take: 500,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      });
+      if (!contacts.length) break;
+      totals.push(await this.classifyContactIds(contacts.map(({ id }) => id)));
+      cursor = contacts.at(-1)!.id;
+    }
+    return {
+      batches: totals.length,
+      processed: totals.reduce((sum, item) => sum + item.processed, 0),
+    };
   }
 
   async classifyContactIds(ids: string[]) {
     const uniqueIds = [...new Set(ids)];
-    const contacts = await this.prisma.contact.findMany({
-      where: { id: { in: uniqueIds }, deletedAt: null },
-    });
     const classified: Contact[] = [];
-
-    for (const contact of contacts) {
-      try {
-        classified.push(await this.classifyAndSave(contact));
-      } catch {
-        this.logger.error('Classification failed for a contact');
-        try {
-          classified.push(
-            await this.prisma.contact.update({
-              where: { id: contact.id, deletedAt: null },
-              data: {
-                crmProvider: CrmProvider.UNKNOWN,
-                businessType: BusinessType.UNKNOWN,
-                strategyCode: 'GENERIC_GENERAL',
-                detectedDomains: [],
-                classifiedAt: new Date(),
-              },
-            }),
-          );
-        } catch {
-          this.logger.error('Failed to save classification fallback');
-        }
+    for (let offset = 0; offset < uniqueIds.length; offset += 500) {
+      const batchIds = uniqueIds.slice(offset, offset + 500);
+      this.logger.log({
+        event: 'CLASSIFICATION_BATCH_STARTED',
+        size: batchIds.length,
+        offset,
+      });
+      const contacts = await this.prisma.contact.findMany({
+        where: { id: { in: batchIds }, deletedAt: null },
+      });
+      for (let index = 0; index < contacts.length; index += 10) {
+        const results = await Promise.allSettled(
+          contacts
+            .slice(index, index + 10)
+            .map((contact) => this.classifyAndSave(contact)),
+        );
+        results.forEach((result, resultIndex) => {
+          const contact = contacts[index + resultIndex];
+          if (result.status === 'fulfilled') {
+            classified.push(result.value);
+            this.logger.debug({
+              event: 'STRATEGY_ASSIGNED',
+              contactId: contact.id,
+              strategyCode: result.value.strategyCode,
+            });
+          } else {
+            this.logger.error({
+              event: 'STRATEGY_ASSIGNMENT_FAILED',
+              contactId: contact.id,
+              errorCode:
+                result.reason instanceof Error ? result.reason.name : 'UNKNOWN',
+            });
+            this.logger.error({
+              event: 'CLASSIFICATION_FAILED',
+              contactId: contact.id,
+              errorCode:
+                result.reason instanceof Error ? result.reason.name : 'UNKNOWN',
+              reason:
+                result.reason instanceof Error
+                  ? result.reason.message.slice(0, 300)
+                  : 'unknown',
+            });
+          }
+        });
       }
+      this.logger.log({
+        event: 'CLASSIFICATION_BATCH_COMPLETED',
+        size: batchIds.length,
+        classified: classified.length,
+        offset,
+      });
     }
 
     return this.summarize(classified);
   }
 
   async getStats() {
-    const [crm, business, strategies, outreach, skipReasons] =
-      await Promise.all([
-        this.prisma.contact.groupBy({
-          by: ['crmProvider'],
-          where: { deletedAt: null },
-          _count: true,
-        }),
-        this.prisma.contact.groupBy({
-          by: ['businessType'],
-          where: { deletedAt: null },
-          _count: true,
-        }),
-        this.prisma.contact.groupBy({
-          by: ['strategyCode'],
-          where: { deletedAt: null },
-          _count: true,
-        }),
-        this.prisma.contact.groupBy({
-          by: ['outreachEligible'],
-          where: { deletedAt: null },
-          _count: true,
-        }),
-        this.prisma.contact.groupBy({
-          by: ['skipReason'],
-          where: { deletedAt: null },
-          _count: true,
-        }),
-      ]);
+    const [
+      crm,
+      business,
+      strategies,
+      outreach,
+      skipReasons,
+      total,
+      classified,
+      strategyAssigned,
+    ] = await Promise.all([
+      this.prisma.contact.groupBy({
+        by: ['crmProvider'],
+        where: { deletedAt: null },
+        _count: true,
+      }),
+      this.prisma.contact.groupBy({
+        by: ['businessType'],
+        where: { deletedAt: null },
+        _count: true,
+      }),
+      this.prisma.contact.groupBy({
+        by: ['strategyCode'],
+        where: { deletedAt: null },
+        _count: true,
+      }),
+      this.prisma.contact.groupBy({
+        by: ['outreachEligible'],
+        where: { deletedAt: null },
+        _count: true,
+      }),
+      this.prisma.contact.groupBy({
+        by: ['skipReason'],
+        where: { deletedAt: null },
+        _count: true,
+      }),
+      this.prisma.contact.count({ where: { deletedAt: null } }),
+      this.prisma.contact.count({
+        where: { deletedAt: null, classifiedAt: { not: null } },
+      }),
+      this.prisma.contact.count({
+        where: { deletedAt: null, strategyCode: { not: null } },
+      }),
+    ]);
 
     return {
       crmProvider: Object.fromEntries(
@@ -139,6 +192,23 @@ export class ClassificationService {
       skipReason: Object.fromEntries(
         skipReasons.map((row) => [row.skipReason ?? 'NONE', row._count]),
       ),
+      totals: {
+        total,
+        classified,
+        unclassified: total - classified,
+        strategyAssigned,
+        strategyMissing: total - strategyAssigned,
+        strategyInvalid: strategies.reduce(
+          (sum, row) =>
+            row.strategyCode &&
+            !(SYSTEM_STRATEGY_CODES as readonly string[]).includes(
+              row.strategyCode,
+            )
+              ? sum + row._count
+              : sum,
+          0,
+        ),
+      },
     };
   }
 

@@ -112,14 +112,29 @@ export class WhatsAppMessagingService {
     }
     const pending = prepared.message;
 
+    this.logger.log({
+      event: 'WHATSAPP_SEND_STARTED',
+      conversationId: data.conversationId,
+      messageId: data.messageId,
+      whatsAppMessageId: pending.id,
+    });
     try {
       const sent = await this.client.sendText(chatId, data.text);
       const identity = WhatsAppClientService.externalMessageIdentity(sent);
       if (identity.source === 'FALLBACK_ID') {
-        throw new WhatsAppTransportError(
-          'WHATSAPP_EXTERNAL_ID_MISSING',
-          'WhatsApp accepted the message without a provider message id',
-        );
+        const whatsappMessage = await this.markOutcomeUnknown(pending.id);
+        this.logger.warn({
+          event: 'WHATSAPP_SEND_OUTCOME_UNKNOWN',
+          conversationId: data.conversationId,
+          messageId: data.messageId,
+          whatsAppMessageId: pending.id,
+          reason: 'PROVIDER_MESSAGE_ID_MISSING',
+        });
+        return {
+          whatsappMessage: this.safeMessage(whatsappMessage),
+          alreadySent: false,
+          outcomePending: true,
+        };
       }
       const externalMessageId = identity.value;
       const whatsappMessage = await this.prisma.whatsAppMessage.update({
@@ -133,30 +148,25 @@ export class WhatsAppMessagingService {
       return {
         whatsappMessage: this.safeMessage(whatsappMessage),
         alreadySent: false,
+        outcomePending: false,
       };
     } catch (error) {
-      await this.markOutcomeUnknown(pending.id);
-      const transportError =
-        error instanceof WhatsAppTransportError
-          ? error
-          : new WhatsAppTransportError(
-              'WHATSAPP_SEND_OUTCOME_UNKNOWN',
-              'WhatsApp transport did not confirm the send outcome',
-              { cause: error },
-            );
-      this.logger.error({
-        event: 'WHATSAPP_OUTBOUND_FAILED',
-        stage: 'WHATSAPP_OUTBOUND',
+      const whatsappMessage = await this.markOutcomeUnknown(pending.id);
+      this.logger.warn({
+        event: 'WHATSAPP_SEND_OUTCOME_UNKNOWN',
         whatsAppMessageId: pending.id,
+        conversationId: data.conversationId,
         messageId: data.messageId,
-        errorCode: transportError.code,
-        errorName: transportError.name,
-        errorMessage: transportError.message.slice(0, 1000),
-        errorStack: this.safeErrorStack(transportError),
+        errorCode: this.errorCode(error),
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+        errorMessage:
+          error instanceof Error ? error.message.slice(0, 1000) : 'unknown',
       });
-      throw new BadGatewayException('Не удалось отправить ответ в WhatsApp', {
-        cause: transportError,
-      });
+      return {
+        whatsappMessage: this.safeMessage(whatsappMessage),
+        alreadySent: false,
+        outcomePending: true,
+      };
     }
   }
 
@@ -593,7 +603,7 @@ export class WhatsAppMessagingService {
     if (!externalMessageId || !status) return;
     this.logger.debug(
       JSON.stringify({
-        event: 'whatsapp_ack',
+        event: 'WHATSAPP_ACK_RECEIVED',
         externalMessageId,
         ack,
         mappedStatus: status,
@@ -811,6 +821,15 @@ export class WhatsAppMessagingService {
           'WhatsApp send outcome is unknown; automatic retry disabled',
       },
     });
+    return this.prisma.whatsAppMessage.findUniqueOrThrow({ where: { id } });
+  }
+
+  private errorCode(error: unknown) {
+    if (error && typeof error === 'object' && 'code' in error) {
+      const code = (error as { code?: unknown }).code;
+      if (typeof code === 'string') return code;
+    }
+    return error instanceof Error ? error.name : 'UNKNOWN';
   }
 
   private messageDate(message: WebMessage) {

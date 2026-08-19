@@ -84,21 +84,20 @@ export class MessagesService {
   }
 
   async findLatestUnprocessedClient(conversationId: string) {
-    const processed = await this.prisma.aiRun.findMany({
-      where: { conversationId, triggerMessageId: { not: null } },
-      select: { triggerMessageId: true },
-    });
     return this.prisma.message.findFirst({
       where: {
         conversationId,
         role: MessageRole.CLIENT,
-        id: {
-          notIn: processed.flatMap(({ triggerMessageId }) =>
-            triggerMessageId ? [triggerMessageId] : [],
-          ),
-        },
+        aiRunId: null,
       },
       orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  findUnprocessedClients(conversationId: string) {
+    return this.prisma.message.findMany({
+      where: { conversationId, role: MessageRole.CLIENT, aiRunId: null },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
   }
 

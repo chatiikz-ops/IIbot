@@ -211,6 +211,13 @@ export class TelegramNotificationsService {
               messagePreview: input.text.slice(0, 700),
             },
           });
+          this.logger.log({
+            event: 'TELEGRAM_NOTIFICATION_CREATED',
+            notificationId: notification.id,
+            type: input.type,
+            contactId: input.contactId,
+            conversationId: input.conversationId,
+          });
         } catch (error) {
           if (
             error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -223,6 +230,11 @@ export class TelegramNotificationsService {
           throw error;
         }
         try {
+          this.logger.log({
+            event: 'TELEGRAM_SEND_ATTEMPT',
+            notificationId: notification.id,
+            type: input.type,
+          });
           const sent = await this.bot.sendMessage(
             recipient.telegramChatId!,
             input.text.slice(0, 4000),
@@ -231,6 +243,13 @@ export class TelegramNotificationsService {
           await this.prisma.telegramRecipient.update({
             where: { id: recipient.id },
             data: { lastNotificationAt: new Date() },
+          });
+          this.logger.log({
+            event: 'TELEGRAM_SEND_SUCCESS',
+            notificationId: notification.id,
+            type: input.type,
+            attempts: sent.attempts,
+            providerMessageId: String(sent.message_id),
           });
           return this.prisma.telegramNotification.update({
             where: { id: notification.id },
@@ -243,6 +262,16 @@ export class TelegramNotificationsService {
             },
           });
         } catch (error) {
+          this.logger.error({
+            event: 'TELEGRAM_SEND_FAILED',
+            notificationId: notification.id,
+            type: input.type,
+            attempts: this.errorAttempts(error),
+            errorCode:
+              error instanceof Error
+                ? error.message.slice(0, 100)
+                : 'TELEGRAM_ERROR',
+          });
           return this.prisma.telegramNotification.update({
             where: { id: notification.id },
             data: {

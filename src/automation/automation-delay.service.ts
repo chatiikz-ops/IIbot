@@ -12,23 +12,54 @@ export class AutomationDelayService {
     delaySeconds: number,
     mockScenario?: string,
   ) {
-    const job = await this.prisma.automationJob.upsert({
-      where: { deduplicationKey: `conversation-reply:${input.messageId}` },
-      create: {
-        type: AutomationJobType.CONVERSATION_REPLY,
-        runAt: new Date(Date.now() + delaySeconds * 1000),
-        contactId: input.contactId,
-        conversationId: input.conversationId,
-        messageId: input.messageId,
-        deduplicationKey: `conversation-reply:${input.messageId}`,
-        payload: { ...input, mockScenario },
-      },
-      update: {},
+    const windowMs = this.envMs('INBOUND_AGGREGATION_WINDOW_MS', 3000);
+    const maxMs = this.envMs('INBOUND_AGGREGATION_MAX_MS', 8000);
+    const now = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`inbound-aggregation:${input.conversationId}`}))`;
+      const pending = await tx.automationJob.findFirst({
+        where: {
+          type: AutomationJobType.CONVERSATION_REPLY,
+          status: 'PENDING',
+          conversationId: input.conversationId,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      const requestedAt = now.getTime() + Math.max(delaySeconds * 1000, windowMs);
+      if (pending) {
+        const deadline = pending.createdAt.getTime() + maxMs;
+        await tx.automationJob.update({
+          where: { id: pending.id },
+          data: {
+            runAt: new Date(Math.min(requestedAt, deadline)),
+            contactId: input.contactId,
+            messageId: input.messageId,
+            payload: { ...input, mockScenario },
+          },
+        });
+        return true;
+      }
+      await tx.automationJob.create({
+        data: {
+          type: AutomationJobType.CONVERSATION_REPLY,
+          runAt: new Date(requestedAt),
+          contactId: input.contactId,
+          conversationId: input.conversationId,
+          messageId: input.messageId,
+          deduplicationKey: `conversation-reply:${input.conversationId}:${input.messageId}`,
+          payload: { ...input, mockScenario },
+        },
+      });
+      return true;
     });
-    return job.attempts === 0 && job.status === 'PENDING';
   }
 
   get pendingCount() {
     return this.prisma.automationJob.count({ where: { status: 'PENDING' } });
+  }
+
+  private envMs(name: string, fallback: number) {
+    const value = Number(process.env[name] ?? fallback);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
   }
 }

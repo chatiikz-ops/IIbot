@@ -91,6 +91,7 @@ export class AiService {
     conversationId: string,
     clientMessageId: string,
     scenarioValue?: string,
+    aggregatedMessageIds: string[] = [clientMessageId],
   ) {
     const conversation = await this.prisma.conversation.findUnique({
       where: { id: conversationId },
@@ -133,7 +134,12 @@ export class AiService {
 
     let run: { id: string };
     try {
-      run = await this.createRun(conversationId, clientMessageId, prompt);
+      run = await this.createRun(
+        conversationId,
+        clientMessageId,
+        prompt,
+        aggregatedMessageIds,
+      );
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -216,7 +222,13 @@ export class AiService {
 
   hasProcessedMessage(conversationId: string, messageId: string) {
     return this.prisma.aiRun.findFirst({
-      where: { conversationId, triggerMessageId: messageId },
+      where: {
+        conversationId,
+        OR: [
+          { triggerMessageId: messageId },
+          { processedMessages: { some: { id: messageId } } },
+        ],
+      },
     });
   }
 
@@ -228,16 +240,33 @@ export class AiService {
     conversationId: string,
     triggerMessageId: string | null,
     prompt: { promptStrategyId: string; promptVersionId: string },
+    aggregatedMessageIds: string[] = [],
   ) {
-    return this.prisma.aiRun.create({
-      data: {
-        conversationId,
-        triggerMessageId,
-        promptStrategyId: prompt.promptStrategyId,
-        promptVersionId: prompt.promptVersionId,
-        model: this.config.providerModel,
-        startedAt: new Date(),
-      },
+    const messageIds = [...new Set(aggregatedMessageIds)];
+    return this.prisma.$transaction(async (tx) => {
+      const run = await tx.aiRun.create({
+        data: {
+          conversationId,
+          triggerMessageId,
+          promptStrategyId: prompt.promptStrategyId,
+          promptVersionId: prompt.promptVersionId,
+          model: this.config.providerModel,
+          startedAt: new Date(),
+        },
+      });
+      const claimed = await tx.message.updateMany({
+        where: {
+          id: { in: messageIds },
+          conversationId,
+          role: MessageRole.CLIENT,
+          aiRunId: null,
+        },
+        data: { aiRunId: run.id },
+      });
+      if (claimed.count !== messageIds.length) {
+        throw new ConflictException('One or more messages were already processed');
+      }
+      return run;
     });
   }
 

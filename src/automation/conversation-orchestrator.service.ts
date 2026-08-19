@@ -194,6 +194,7 @@ export class ConversationOrchestratorService {
   async startConversationForCampaignTarget(
     targetId: string,
     mockScenario?: string,
+    automationJobId?: string,
   ) {
     const settings = await this.settings.get();
     if (!settings.enabled) {
@@ -222,8 +223,7 @@ export class ConversationOrchestratorService {
     }
     this.assertContactEligible(target.contact);
     await this.assertWhatsAppConnected();
-    const strategyCode =
-      target.strategyCode ?? target.contact.strategyCode ?? null;
+    const strategyCode = target.strategyCode ?? null;
     if (!strategyCode) {
       throw new NotFoundException(
         'Для контакта не настроена активная стратегия',
@@ -256,12 +256,27 @@ export class ConversationOrchestratorService {
     let aiRunId: string | undefined;
     if (!aiMessage) {
       try {
+        this.logger.log({
+          event: 'AI_GENERATION_STARTED',
+          campaignId: target.campaignId,
+          targetId: target.id,
+          conversationId: conversation.id,
+          jobId: automationJobId,
+        });
         const result = await this.ai.generateFirstMessage(
           conversation.id,
           mockScenario,
         );
         aiMessage = result.message;
         aiRunId = result.run.id;
+        this.logger.log({
+          event: 'AI_GENERATION_COMPLETED',
+          campaignId: target.campaignId,
+          targetId: target.id,
+          conversationId: conversation.id,
+          messageId: aiMessage?.id ?? null,
+          jobId: automationJobId,
+        });
         await this.events.create({
           type: AutomationEventType.AI_COMPLETED,
           contactId: target.contactId,
@@ -294,6 +309,14 @@ export class ConversationOrchestratorService {
     }
 
     try {
+      this.logger.log({
+        event: 'WHATSAPP_SEND_STARTED',
+        campaignId: target.campaignId,
+        targetId: target.id,
+        conversationId: conversation.id,
+        messageId: aiMessage.id,
+        jobId: automationJobId,
+      });
       const sent = await this.whatsapp.sendAiMessage({
         contactId: target.contactId,
         conversationId: conversation.id,
@@ -303,6 +326,17 @@ export class ConversationOrchestratorService {
       });
       await this.campaigns.updateTargetStatus(target.campaignId, target.id, {
         status: CampaignTargetStatus.WAITING_REPLY,
+      });
+      this.logger.log({
+        event: sent.outcomePending
+          ? 'WHATSAPP_SEND_OUTCOME_UNKNOWN'
+          : 'WHATSAPP_SEND_ACCEPTED',
+        campaignId: target.campaignId,
+        targetId: target.id,
+        conversationId: conversation.id,
+        messageId: aiMessage.id,
+        whatsAppMessageId: sent.whatsappMessage.id,
+        jobId: automationJobId,
       });
       await this.events.create({
         type: AutomationEventType.WHATSAPP_SENT,
@@ -362,15 +396,29 @@ export class ConversationOrchestratorService {
       await this.skip(input, 'AUTOMATION_DISABLED_AFTER_SCHEDULE');
       return;
     }
+    const conversation = await this.conversations.findOne(input.conversationId);
+    if (isTerminalConversationStatus(conversation.status)) {
+      await this.skip(input, `CONVERSATION_TERMINAL_${conversation.status}`);
+      return;
+    }
     try {
       await this.contacts.findOne(input.contactId);
     } catch {
       await this.skip(input, 'CONTACT_NOT_ACTIVE');
       return;
     }
+    const unprocessedMessages = await this.messages.findUnprocessedClients(
+      input.conversationId,
+    );
+    if (unprocessedMessages.length === 0) {
+      await this.skip(input, 'AGGREGATION_ALREADY_PROCESSED');
+      return;
+    }
+    const triggerMessage = unprocessedMessages.at(-1)!;
+    const processingInput = { ...input, messageId: triggerMessage.id };
     const existingRun = await this.ai.hasProcessedMessage(
       input.conversationId,
-      input.messageId,
+      triggerMessage.id,
     );
     if (existingRun) {
       const existingReply = existingRun.reply
@@ -385,14 +433,14 @@ export class ConversationOrchestratorService {
         existingReply?.text === existingRun.reply
       ) {
         await this.sendFollowUp(
-          input,
+          processingInput,
           existingRun.id,
           existingReply,
           automationJobId,
         );
         return;
       }
-      await this.skip(input, 'MESSAGE_ALREADY_PROCESSED');
+      await this.skip(processingInput, 'MESSAGE_ALREADY_PROCESSED');
       return;
     }
 
@@ -400,7 +448,7 @@ export class ConversationOrchestratorService {
       type: AutomationEventType.AUTO_REPLY_STARTED,
       contactId: input.contactId,
       conversationId: input.conversationId,
-      messageId: input.messageId,
+      messageId: triggerMessage.id,
       whatsAppMessageId: input.whatsAppMessageId,
     });
 
@@ -409,15 +457,16 @@ export class ConversationOrchestratorService {
       result = this.requireAiProcessingResult(
         await this.ai.processClientMessage(
           input.conversationId,
-          input.messageId,
+          triggerMessage.id,
           mockScenario,
+          unprocessedMessages.map(({ id }) => id),
         ),
       );
       await this.events.create({
         type: AutomationEventType.AI_COMPLETED,
         contactId: input.contactId,
         conversationId: input.conversationId,
-        messageId: input.messageId,
+        messageId: triggerMessage.id,
         aiRunId: result.run.id,
         metadata: {
           action: result.result?.action ?? null,
@@ -429,7 +478,8 @@ export class ConversationOrchestratorService {
         automationJobId,
         contactId: input.contactId,
         conversationId: input.conversationId,
-        sourceMessageId: input.messageId,
+        sourceMessageId: triggerMessage.id,
+        aggregatedMessageIds: unprocessedMessages.map(({ id }) => id),
         aiRunId: result.run.id,
         aiMessageId: result.message?.id ?? null,
         replyCreated: Boolean(result.message),
@@ -443,7 +493,7 @@ export class ConversationOrchestratorService {
         reason: this.errorCode(error),
       });
       void this.telegram.notifyAiFailed({
-        deduplicationKey: `${input.messageId}:AI_FAILED`,
+        deduplicationKey: `${triggerMessage.id}:AI_FAILED`,
         text: '❗ Ошибка AI\n\nДиалог временно остановлен. Не удалось получить корректный ответ AI.',
         contactId: input.contactId,
         conversationId: input.conversationId,

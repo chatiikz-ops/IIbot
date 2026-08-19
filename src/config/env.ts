@@ -22,12 +22,30 @@ const schema = z
       .default(10),
     AUTOMATION_WORKER_ENABLED: booleanString.default('true'),
     AUTOMATION_WORKER_POLL_MS: z.coerce.number().int().min(100).default(1000),
-    AUTOMATION_WORKER_CONCURRENCY: z.coerce
+    CAMPAIGN_WORKER_CONCURRENCY: z.coerce
       .number()
       .int()
       .min(1)
-      .max(10)
-      .default(3),
+      .max(15)
+      .default(10),
+    INBOUND_WORKER_CONCURRENCY: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .default(20),
+    INBOUND_AGGREGATION_WINDOW_MS: z.coerce
+      .number()
+      .int()
+      .min(250)
+      .max(30_000)
+      .default(3000),
+    INBOUND_AGGREGATION_MAX_MS: z.coerce
+      .number()
+      .int()
+      .min(1000)
+      .max(60_000)
+      .default(8000),
     AUTOMATION_JOB_STALE_LOCK_SECONDS: z.coerce
       .number()
       .int()
@@ -61,6 +79,15 @@ const schema = z
         code: 'custom',
         path: ['AUTH_COOKIE_SECURE'],
         message: 'must be true in production',
+      });
+    }
+    if (
+      env.INBOUND_AGGREGATION_MAX_MS < env.INBOUND_AGGREGATION_WINDOW_MS
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['INBOUND_AGGREGATION_MAX_MS'],
+        message: 'must be greater than or equal to INBOUND_AGGREGATION_WINDOW_MS',
       });
     }
   });

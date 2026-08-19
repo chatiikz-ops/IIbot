@@ -23,8 +23,10 @@ type ClaimedJob = {
   type: AutomationJobType;
   attempts: number;
   maxAttempts: number;
+  campaignId: string | null;
   campaignTargetId: string | null;
   payload: Prisma.JsonValue | null;
+  createdAt: Date;
 };
 
 @Injectable()
@@ -36,6 +38,9 @@ export class AutomationWorkerService
   private timer?: ReturnType<typeof setTimeout>;
   private stopping = false;
   private active = 0;
+  private campaignActive = 0;
+  private inboundActive = 0;
+  private lastQueueMetricsAt = 0;
   private readonly pollMs = Math.max(
     100,
     Number(process.env.AUTOMATION_WORKER_POLL_MS || 1000),
@@ -44,9 +49,13 @@ export class AutomationWorkerService
     30,
     Number(process.env.AUTOMATION_JOB_STALE_LOCK_SECONDS || 300),
   );
-  private readonly concurrency = Math.min(
-    10,
-    Math.max(1, Number(process.env.AUTOMATION_WORKER_CONCURRENCY || 3)),
+  private readonly campaignConcurrency = Math.min(
+    15,
+    Math.max(1, Number(process.env.CAMPAIGN_WORKER_CONCURRENCY || 10)),
+  );
+  private readonly inboundConcurrency = Math.min(
+    50,
+    Math.max(1, Number(process.env.INBOUND_WORKER_CONCURRENCY || 20)),
   );
 
   constructor(
@@ -72,7 +81,8 @@ export class AutomationWorkerService
       enabled: true,
       workerId: this.workerId,
       intervalMs: this.pollMs,
-      batchSize: this.concurrency,
+      campaignConcurrency: this.campaignConcurrency,
+      inboundConcurrency: this.inboundConcurrency,
     });
     this.schedule(0);
   }
@@ -91,10 +101,21 @@ export class AutomationWorkerService
   private async tick() {
     try {
       await this.enqueueCampaignTargets();
-      while (!this.stopping && this.active < this.concurrency) {
-        const job = await this.claim();
+      await this.logQueueDepth();
+      while (!this.stopping && this.inboundActive < this.inboundConcurrency) {
+        const job = await this.claim(AutomationJobType.CONVERSATION_REPLY);
         if (!job) break;
         this.active += 1;
+        this.inboundActive += 1;
+        this.logCapacity();
+        this.launchWithinBoundary(job);
+      }
+      while (!this.stopping && this.campaignActive < this.campaignConcurrency) {
+        const job = await this.claim(AutomationJobType.CAMPAIGN_TARGET);
+        if (!job) break;
+        this.active += 1;
+        this.campaignActive += 1;
+        this.logCapacity();
         this.launchWithinBoundary(job);
       }
     } catch (error) {
@@ -142,6 +163,12 @@ export class AutomationWorkerService
       await this.recoverBoundaryFailure(job, error);
     } finally {
       this.active -= 1;
+      if (job.type === AutomationJobType.CAMPAIGN_TARGET) {
+        this.campaignActive = Math.max(0, this.campaignActive - 1);
+      } else {
+        this.inboundActive = Math.max(0, this.inboundActive - 1);
+      }
+      this.logCapacity();
     }
   }
 
@@ -175,31 +202,76 @@ export class AutomationWorkerService
     }
   }
 
-  private async claim(): Promise<ClaimedJob | null> {
+  private async claim(type: AutomationJobType): Promise<ClaimedJob | null> {
     const rows = await this.prisma.$queryRaw<ClaimedJob[]>`
       WITH candidate AS (
-        SELECT "id" FROM "AutomationJob"
-        WHERE (("status" = 'PENDING' AND "runAt" <= NOW())
-          OR ("status" = 'PROCESSING' AND "lockedAt" < NOW() - (${this.staleLockSeconds} * INTERVAL '1 second')))
-        ORDER BY "runAt", "createdAt"
+        SELECT candidate_job."id" FROM "AutomationJob" candidate_job
+        WHERE ((candidate_job."status" = 'PENDING' AND candidate_job."runAt" <= NOW())
+          OR (candidate_job."status" = 'PROCESSING' AND candidate_job."lockedAt" < NOW() - (${this.staleLockSeconds} * INTERVAL '1 second')))
+          AND candidate_job."type" = ${type}::"AutomationJobType"
+          AND (${type}::"AutomationJobType" <> 'CONVERSATION_REPLY'
+            OR candidate_job."conversationId" IS NULL
+            OR NOT EXISTS (
+              SELECT 1 FROM "AutomationJob" active_job
+              WHERE active_job."conversationId" = candidate_job."conversationId"
+                AND active_job."type" = 'CONVERSATION_REPLY'
+                AND active_job."status" = 'PROCESSING'
+                AND active_job."id" <> candidate_job."id"
+                AND active_job."lockedAt" >= NOW() - (${this.staleLockSeconds} * INTERVAL '1 second')
+            ))
+        ORDER BY candidate_job."runAt", candidate_job."createdAt"
         FOR UPDATE SKIP LOCKED LIMIT 1
       )
       UPDATE "AutomationJob" job SET
         "status" = 'PROCESSING', "lockedAt" = NOW(), "lockedBy" = ${this.workerId},
         "attempts" = job."attempts" + 1, "updatedAt" = NOW()
       FROM candidate WHERE job."id" = candidate."id"
-      RETURNING job."id", job."type", job."attempts", job."maxAttempts", job."campaignTargetId", job."payload"
+      RETURNING job."id", job."type", job."attempts", job."maxAttempts", job."campaignId", job."campaignTargetId", job."payload", job."createdAt"
     `;
     if (rows[0]) {
       this.logger.log({
-        event: 'AUTOMATION_JOB_CLAIMED',
+        event:
+          rows[0].type === AutomationJobType.CAMPAIGN_TARGET
+            ? 'CAMPAIGN_TARGET_CLAIMED'
+            : 'AUTOMATION_JOB_CLAIMED',
         jobId: rows[0].id,
         type: rows[0].type,
         attempts: rows[0].attempts,
+        campaignId: rows[0].campaignId,
         workerId: this.workerId,
       });
     }
     return rows[0] ?? null;
+  }
+
+  private logCapacity() {
+    this.logger.debug({
+      event: 'AUTOMATION_WORKER_CAPACITY',
+      CAMPAIGN_ACTIVE_WORKERS: this.campaignActive,
+      INBOUND_ACTIVE_WORKERS: this.inboundActive,
+    });
+  }
+
+  private async logQueueDepth() {
+    const now = Date.now();
+    if (now - this.lastQueueMetricsAt < 10_000) return;
+    this.lastQueueMetricsAt = now;
+    const [campaignDepth, inboundDepth] = await Promise.all([
+      this.prisma.automationJob.count({
+        where: {
+          type: AutomationJobType.CAMPAIGN_TARGET,
+          status: AutomationJobStatus.PENDING,
+        },
+      }),
+      this.prisma.automationJob.count({
+        where: {
+          type: AutomationJobType.CONVERSATION_REPLY,
+          status: AutomationJobStatus.PENDING,
+        },
+      }),
+    ]);
+    this.logger.debug({ event: 'CAMPAIGN_QUEUE_DEPTH', depth: campaignDepth });
+    this.logger.debug({ event: 'INBOUND_QUEUE_DEPTH', depth: inboundDepth });
   }
 
   private async execute(job: ClaimedJob) {
@@ -224,8 +296,15 @@ export class AutomationWorkerService
         job.type === AutomationJobType.CAMPAIGN_TARGET &&
         job.campaignTargetId
       ) {
+        this.logger.log({
+          event: 'CAMPAIGN_TARGET_STARTED',
+          jobId: job.id,
+          campaignId: job.campaignId,
+          targetId: job.campaignTargetId,
+        });
         const deferredUntil = await this.runCampaignTarget(
           job.campaignTargetId,
+          job.id,
         );
         if (deferredUntil) {
           await this.prisma.automationJob.update({
@@ -253,6 +332,25 @@ export class AutomationWorkerService
           lastError: null,
           errorCode: null,
         },
+      });
+      if (job.type === AutomationJobType.CAMPAIGN_TARGET) {
+        this.logger.log({
+          event: 'CAMPAIGN_TARGET_COMPLETED',
+          jobId: job.id,
+          campaignId: job.campaignId,
+          targetId: job.campaignTargetId,
+        });
+      }
+      const createdAtMs = new Date(job.createdAt).getTime();
+      this.logger.log({
+        event:
+          job.type === AutomationJobType.CAMPAIGN_TARGET
+            ? 'CAMPAIGN_TARGET_LATENCY'
+            : 'INBOUND_RESPONSE_LATENCY',
+        jobId: job.id,
+        latencyMs: Number.isFinite(createdAtMs)
+          ? Math.max(0, Date.now() - createdAtMs)
+          : null,
       });
     } catch (error) {
       const terminalCancellation =
@@ -282,8 +380,12 @@ export class AutomationWorkerService
         },
       });
       this.logger.warn({
-        event: 'AUTOMATION_JOB_FAILED',
+        event:
+          job.type === AutomationJobType.CAMPAIGN_TARGET
+            ? 'CAMPAIGN_TARGET_FAILED'
+            : 'AUTOMATION_JOB_FAILED',
         jobId: job.id,
+        campaignId: job.campaignId,
         type: job.type,
         attempts: job.attempts,
         status,
@@ -291,8 +393,11 @@ export class AutomationWorkerService
     }
   }
 
-  private async runCampaignTarget(targetId: string): Promise<Date | null> {
-    return this.prisma.$transaction(
+  private async runCampaignTarget(
+    targetId: string,
+    jobId?: string,
+  ): Promise<Date | null> {
+    const deferredUntil = await this.prisma.$transaction(
       async (tx) => {
         const target = await tx.campaignTarget.findUnique({
           where: { id: targetId },
@@ -323,14 +428,17 @@ export class AutomationWorkerService
         if (sentToday >= settings.dailyMessageLimit) {
           return window.nextDayStart;
         }
-        await this.orchestrator.startConversationForCampaignTarget(
-          targetId,
-          process.env.OPENAI_MOCK_MODE === 'true' ? 'QUALIFIED' : undefined,
-        );
         return null;
       },
-      { timeout: 120_000 },
+      { timeout: 10_000 },
     );
+    if (deferredUntil) return deferredUntil;
+    await this.orchestrator.startConversationForCampaignTarget(
+      targetId,
+      process.env.OPENAI_MOCK_MODE === 'true' ? 'QUALIFIED' : undefined,
+      jobId,
+    );
+    return null;
   }
 
   private async enqueueCampaignTargets() {
@@ -345,7 +453,7 @@ export class AutomationWorkerService
       orderBy: { createdAt: 'asc' },
       take: 50,
     });
-    for (const target of targets) {
+    for (const [index, target] of targets.entries()) {
       const settings = target.campaign.settings!;
       const delay =
         settings.minDelaySeconds +
@@ -357,7 +465,13 @@ export class AutomationWorkerService
         where: { deduplicationKey: `campaign-target:${target.id}` },
         create: {
           type: AutomationJobType.CAMPAIGN_TARGET,
-          runAt: new Date(Date.now() + delay * 1000),
+          // Spread otherwise-identical runAt values so a full pool does not
+          // dispatch all outbound messages in the same millisecond.
+          runAt: new Date(
+            Date.now() +
+              delay * 1000 +
+              (index % this.campaignConcurrency) * 100,
+          ),
           contactId: target.contactId,
           campaignId: target.campaignId,
           campaignTargetId: target.id,

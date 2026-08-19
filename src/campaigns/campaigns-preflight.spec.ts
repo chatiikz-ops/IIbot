@@ -31,6 +31,7 @@ describe('CampaignsService preflight', () => {
           deletedAt: null,
           outreachEligible: true,
           strategyCode: 'GENERIC_GENERAL',
+          classifiedAt: new Date(),
         },
       },
     ],
@@ -68,6 +69,7 @@ describe('CampaignsService preflight', () => {
         ),
       },
       campaignLog: { create: jest.fn().mockResolvedValue({}) },
+      $executeRaw: jest.fn().mockResolvedValue(0),
       $transaction: jest.fn((operation) => operation(prisma)),
     };
     const whatsapp = {

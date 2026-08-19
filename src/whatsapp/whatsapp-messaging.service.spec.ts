@@ -110,6 +110,51 @@ describe('WhatsAppClientService ACK mapping', () => {
   });
 });
 
+describe('WhatsAppMessagingService late ACK reconciliation', () => {
+  it.each([
+    [MessageAck.ACK_SERVER, WhatsAppMessageStatus.SENT],
+    [MessageAck.ACK_DEVICE, WhatsAppMessageStatus.DELIVERED],
+    [MessageAck.ACK_READ, WhatsAppMessageStatus.READ],
+  ])('promotes OUTCOME_UNKNOWN on late ACK %s', async (ack, status) => {
+    const updateMany = jest
+      .fn()
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValueOnce({ count: 1 });
+    const prisma = {
+      whatsAppMessage: {
+        updateMany,
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'wa-unknown',
+          status: WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+          sentAt: null,
+        }),
+      },
+    };
+    const service = new WhatsAppMessagingService(
+      prisma as never,
+      { onMessage: jest.fn(), onAck: jest.fn() } as never,
+      {} as never,
+    );
+    await service.handleAck(
+      {
+        id: { _serialized: 'provider-id' },
+        to: '77086810693@c.us',
+        body: 'Saved reply',
+      } as never,
+      ack,
+    );
+    expect(updateMany).toHaveBeenLastCalledWith({
+      where: { id: 'wa-unknown', externalMessageId: null },
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      data: expect.objectContaining({
+        externalMessageId: 'provider-id',
+        status,
+        errorMessage: null,
+      }),
+    });
+  });
+});
+
 describe('WhatsAppMessagingService outbound idempotency', () => {
   it('calls transport once when provider throws after a possible send', async () => {
     const outbound = {
@@ -123,6 +168,7 @@ describe('WhatsAppMessagingService outbound idempotency', () => {
     const prisma = {
       whatsAppMessage: {
         findUnique: jest.fn(() => Promise.resolve(stored)),
+        findUniqueOrThrow: jest.fn(() => Promise.resolve(stored)),
         create: jest.fn(() => {
           stored = { ...outbound };
           return Promise.resolve(stored);
@@ -160,7 +206,11 @@ describe('WhatsAppMessagingService outbound idempotency', () => {
       text: 'Saved reply',
     };
 
-    await expect(service.sendAiMessage(input)).rejects.toThrow();
+    await expect(service.sendAiMessage(input)).resolves.toMatchObject({
+      alreadySent: false,
+      outcomePending: true,
+      whatsappMessage: { status: WhatsAppMessageStatus.OUTCOME_UNKNOWN },
+    });
     await expect(service.sendAiMessage(input)).resolves.toMatchObject({
       alreadySent: true,
       whatsappMessage: { status: WhatsAppMessageStatus.OUTCOME_UNKNOWN },

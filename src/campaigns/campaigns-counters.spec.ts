@@ -39,6 +39,7 @@ describe('Campaign counters source of truth', () => {
         leadCount: 1,
         rejectedCount: 1,
         handoffCount: 1,
+        failedCount: 1,
       },
     });
     expect(updateMany).not.toHaveBeenCalled();

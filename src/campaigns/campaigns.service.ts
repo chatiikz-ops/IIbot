@@ -105,14 +105,17 @@ export class CampaignsService {
           include: { settings: true },
         });
         if (contacts.length > 0) {
-          await tx.campaignTarget.createMany({
-            data: contacts.map((contact) => ({
-              campaignId: campaign.id,
-              contactId: contact.id,
-              status: CampaignTargetStatus.READY,
-              strategyCode: contact.strategyCode,
-            })),
-          });
+          for (let offset = 0; offset < contacts.length; offset += 1000) {
+            await tx.campaignTarget.createMany({
+              data: contacts.slice(offset, offset + 1000).map((contact) => ({
+                campaignId: campaign.id,
+                contactId: contact.id,
+                status: CampaignTargetStatus.READY,
+                strategyCode: contact.strategyCode,
+                strategyAssignedAt: new Date(),
+              })),
+            });
+          }
         }
         await this.log(
           tx,
@@ -188,14 +191,17 @@ export class CampaignsService {
         if (contacts) {
           await tx.campaignTarget.deleteMany({ where: { campaignId: id } });
           if (contacts.length > 0) {
-            await tx.campaignTarget.createMany({
-              data: contacts.map((contact) => ({
-                campaignId: id,
-                contactId: contact.id,
-                status: CampaignTargetStatus.READY,
-                strategyCode: contact.strategyCode,
-              })),
-            });
+            for (let offset = 0; offset < contacts.length; offset += 1000) {
+              await tx.campaignTarget.createMany({
+                data: contacts.slice(offset, offset + 1000).map((contact) => ({
+                  campaignId: id,
+                  contactId: contact.id,
+                  status: CampaignTargetStatus.READY,
+                  strategyCode: contact.strategyCode,
+                  strategyAssignedAt: new Date(),
+                })),
+              });
+            }
           }
         }
         const updated = await tx.campaign.update({
@@ -231,6 +237,7 @@ export class CampaignsService {
   }
 
   async start(id: string) {
+    await this.refreshStrategySnapshots(id);
     const preflight = await this.preflight(id);
     if (!preflight.ready) {
       throw new ConflictException({
@@ -279,6 +286,7 @@ export class CampaignsService {
                 deletedAt: true,
                 outreachEligible: true,
                 strategyCode: true,
+                classifiedAt: true,
               },
             },
           },
@@ -296,7 +304,7 @@ export class CampaignsService {
     const strategyCodes = [
       ...new Set(
         campaign.targets
-          .map((target) => target.strategyCode ?? target.contact.strategyCode)
+          .map((target) => target.strategyCode)
           .filter((code): code is string => Boolean(code)),
       ),
     ];
@@ -338,6 +346,22 @@ export class CampaignsService {
       issue('CONTACT_DELETED', 'Кампания содержит удалённые контакты');
     if (campaign.targets.some((target) => !target.contact.outreachEligible))
       issue('CONTACT_NOT_ELIGIBLE', 'Кампания содержит исключённые контакты');
+    const unclassifiedCount = campaign.targets.filter(
+      (target) => !target.contact.classifiedAt,
+    ).length;
+    if (unclassifiedCount > 0)
+      issue(
+        'CLASSIFICATION_MISSING',
+        `Для ${unclassifiedCount} контактов не завершена классификация`,
+      );
+    const missingStrategyCount = campaign.targets.filter(
+      (target) => !target.strategyCode,
+    ).length;
+    if (missingStrategyCount > 0)
+      issue(
+        'STRATEGY_MISSING',
+        `Для ${missingStrategyCount} контактов не назначена стратегия`,
+      );
     if (strategyCodes.length === 0)
       issue('STRATEGY_MISSING', 'Для получателей не выбрана стратегия');
     for (const strategy of strategiesReady) {
@@ -371,6 +395,29 @@ export class CampaignsService {
       campaignSendingEnabled: Boolean(automation?.campaignSendingEnabled),
       campaignStatus: campaign.status,
     };
+  }
+
+  private async refreshStrategySnapshots(id: string) {
+    const campaign = await this.getCampaign(id);
+    this.assertEditable(campaign.status);
+    const refreshed = await this.prisma.$executeRaw`
+      UPDATE "CampaignTarget" target
+      SET "strategyCode" = contact."strategyCode", "strategyAssignedAt" = NOW(), "updatedAt" = NOW()
+      FROM "Contact" contact
+      WHERE target."campaignId" = ${id}
+        AND target."contactId" = contact."id"
+        AND target."strategyCode" IS DISTINCT FROM contact."strategyCode"
+    `;
+    if (refreshed > 0) {
+      await this.prisma.campaignLog.create({
+        data: {
+          campaignId: id,
+          event: 'CAMPAIGN_STRATEGY_SNAPSHOT_REFRESHED',
+          message: 'Strategy snapshots refreshed before campaign start',
+          metadata: { refreshed },
+        },
+      });
+    }
   }
 
   pause(id: string) {
@@ -528,6 +575,7 @@ export class CampaignsService {
             campaignId,
             contactId: data.contactId,
             strategyCode: data.strategyCode ?? contact.strategyCode,
+            strategyAssignedAt: new Date(),
             status: CampaignTargetStatus.READY,
           },
           include: { contact: true },
@@ -720,6 +768,7 @@ export class CampaignsService {
         leadCount: exact(CampaignTargetStatus.LEAD),
         rejectedCount: exact(CampaignTargetStatus.REJECTED),
         handoffCount: exact(CampaignTargetStatus.HANDOFF),
+        failedCount: exact(CampaignTargetStatus.ERROR),
       },
     });
     if (count(OPEN_TARGET_STATUSES) === 0) {

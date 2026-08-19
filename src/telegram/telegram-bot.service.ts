@@ -176,6 +176,13 @@ export class TelegramBotService implements OnModuleInit, OnApplicationShutdown {
             this.safeDescription(payload.description),
             attempt + 1,
           );
+        this.logger.warn({
+          event: 'TELEGRAM_RETRY_SCHEDULED',
+          method,
+          attempt: attempt + 1,
+          retryAfterSeconds: payload.parameters?.retry_after ?? 1,
+          errorCode: payload.error_code ?? null,
+        });
         await new Promise((resolve) =>
           setTimeout(resolve, (payload.parameters?.retry_after ?? 1) * 1000),
         );
@@ -195,6 +202,13 @@ export class TelegramBotService implements OnModuleInit, OnApplicationShutdown {
             attempt + 1,
           );
         }
+        this.logger.warn({
+          event: 'TELEGRAM_RETRY_SCHEDULED',
+          method,
+          attempt: attempt + 1,
+          retryAfterMilliseconds: 250 * 2 ** attempt,
+          errorCode: this.safeError(error),
+        });
         await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
       } finally {
         clearTimeout(timer);
