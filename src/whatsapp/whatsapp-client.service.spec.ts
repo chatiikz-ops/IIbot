@@ -467,6 +467,44 @@ describe('WhatsAppClientService lifecycle', () => {
     ).resolves.toEqual({ id: 'sent' });
   });
 
+  it('surfaces a send transport failure even while FSM is CONNECTED', async () => {
+    const operation = service.initialize();
+    await ready();
+    await operation;
+    clients[0].sendMessage.mockRejectedValueOnce(
+      new Error('Execution context was destroyed'),
+    );
+
+    await expect(service.sendText('77001234567@c.us', 'hello')).rejects.toThrow(
+      'Execution context was destroyed',
+    );
+    await expect(service.getStatus()).resolves.toMatchObject({
+      state: 'CONNECTED',
+      connected: true,
+    });
+  });
+
+  it('does not hide a provider result from a stale client generation', async () => {
+    const operation = service.initialize();
+    await ready();
+    await operation;
+    let resolveSend: ((value: { id: { _serialized: string } }) => void) | null =
+      null;
+    clients[0].sendMessage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+    const send = service.sendText('77001234567@c.us', 'hello');
+    (service as unknown as Internals).generation = 2;
+    resolveSend?.({ id: { _serialized: 'provider-stale-generation' } });
+
+    await expect(send).resolves.toMatchObject({
+      id: { _serialized: 'provider-stale-generation' },
+    });
+  });
+
   it('keeps runtime CONNECTED when persistence fails after ready', async () => {
     upsert.mockImplementationOnce(() => Promise.resolve(session));
     upsert.mockImplementationOnce(() => Promise.reject(new Error('db down')));

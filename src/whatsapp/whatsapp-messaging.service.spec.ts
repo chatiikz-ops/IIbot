@@ -98,6 +98,49 @@ describe('WhatsAppMessagingService acknowledgements', () => {
 });
 
 describe('WhatsAppClientService ACK mapping', () => {
+  it('extracts a serialized provider message ID', () => {
+    expect(
+      WhatsAppClientService.externalMessageIdentity({
+        id: { _serialized: 'true_77001234567@c.us_PROVIDER' },
+      } as never),
+    ).toEqual({
+      value: 'true_77001234567@c.us_PROVIDER',
+      source: 'SERIALIZED',
+    });
+  });
+
+  it('extracts the WhatsApp Web 2.3000.x $1 serialized ID fallback', () => {
+    expect(
+      WhatsAppClientService.externalMessageIdentity({
+        id: { $1: 'true_77001234567@c.us_PROVIDER_NEW' },
+      } as never),
+    ).toEqual({
+      value: 'true_77001234567@c.us_PROVIDER_NEW',
+      source: 'SERIALIZED',
+    });
+  });
+
+  it('builds a stable provider ID from inner ID parts', () => {
+    expect(
+      WhatsAppClientService.externalMessageIdentity({
+        id: {
+          id: 'INNER',
+          remote: '77001234567@c.us',
+          fromMe: true,
+        },
+      } as never),
+    ).toEqual({
+      value: 'wwebjs:77001234567@c.us:1:INNER',
+      source: 'MESSAGE_ID_PARTS',
+    });
+  });
+
+  it('classifies a missing provider result as a fallback identity', () => {
+    expect(
+      WhatsAppClientService.externalMessageIdentity(undefined),
+    ).toMatchObject({ source: 'FALLBACK_ID' });
+  });
+
   it.each([
     [MessageAck.ACK_ERROR, WhatsAppMessageStatus.FAILED],
     [MessageAck.ACK_PENDING, null],
@@ -220,6 +263,56 @@ describe('WhatsAppMessagingService outbound idempotency', () => {
     });
 
     expect(client.sendText).toHaveBeenCalledTimes(1);
+    expect(stored?.errorMessage).toContain('provider post-send failure');
+  });
+
+  it('marks a provider result without an ID as OUTCOME_UNKNOWN', async () => {
+    const outbound = {
+      id: 'wa-no-id',
+      messageId: 'ai-no-id',
+      status: WhatsAppMessageStatus.PENDING,
+      externalMessageId: null,
+      errorMessage: null as string | null,
+    };
+    let stored = { ...outbound };
+    const prisma = {
+      whatsAppMessage: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        findUniqueOrThrow: jest.fn(() => Promise.resolve(stored)),
+        create: jest.fn(() => Promise.resolve(stored)),
+        updateMany: jest.fn(({ data }: { data: Partial<typeof stored> }) => {
+          stored = { ...stored, ...data };
+          return Promise.resolve({ count: 1 });
+        }),
+      },
+      message: { findFirst: jest.fn().mockResolvedValue({ id: 'ai-no-id' }) },
+      contact: { findFirst: jest.fn().mockResolvedValue({ id: 'contact-1' }) },
+    };
+    const client = {
+      onMessage: jest.fn(),
+      onAck: jest.fn(),
+      isRegisteredUser: jest.fn().mockResolvedValue(true),
+      sendText: jest.fn().mockResolvedValue(undefined),
+    };
+    const service = new WhatsAppMessagingService(
+      prisma as never,
+      client as never,
+      {} as never,
+    );
+
+    await expect(
+      service.sendAiMessage({
+        contactId: 'contact-1',
+        conversationId: 'conversation-1',
+        messageId: 'ai-no-id',
+        phone: '+77086810693',
+        text: 'Diagnostic',
+      }),
+    ).resolves.toMatchObject({
+      outcomePending: true,
+      whatsappMessage: { status: WhatsAppMessageStatus.OUTCOME_UNKNOWN },
+    });
+    expect(stored.errorMessage).toContain('returned no message ID');
   });
 
   it('does not call the transport again for an already SENT AI message', async () => {

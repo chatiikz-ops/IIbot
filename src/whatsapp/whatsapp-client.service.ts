@@ -310,7 +310,50 @@ export class WhatsAppClientService
 
   async sendText(chatId: string, text: string) {
     this.ensureConnected();
-    return this.client!.sendMessage(chatId, text);
+    const client = this.client!;
+    const generation = this.generation;
+    try {
+      const result = await client.sendMessage(chatId, text);
+      const candidate = result as WebMessage | null | undefined;
+      this.logger.log({
+        event: 'WHATSAPP_SEND_PROVIDER_RESULT',
+        typeOfResult: typeof result,
+        hasId: Boolean(candidate?.id),
+        idSerializedPresent: Boolean(
+          WhatsAppClientService.nonEmptyString(candidate?.id?._serialized),
+        ),
+        idInnerPresent: Boolean(
+          WhatsAppClientService.nonEmptyString(candidate?.id?.id),
+        ),
+        remote:
+          WhatsAppClientService.nonEmptyString(candidate?.id?.remote) ?? null,
+        fromMe: candidate?.id?.fromMe === true,
+        constructorName:
+          result && typeof result === 'object'
+            ? (result.constructor?.name ?? null)
+            : null,
+      });
+      if (client !== this.client || generation !== this.generation) {
+        this.logger.warn({
+          event: 'WHATSAPP_SEND_STALE_CLIENT_GENERATION',
+          sendGeneration: generation,
+          currentGeneration: this.generation,
+        });
+      }
+      return candidate;
+    } catch (error) {
+      const cause = error instanceof Error ? error.cause : undefined;
+      this.logger.error({
+        event: 'WHATSAPP_SEND_PROVIDER_ERROR',
+        generation,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+        errorMessage: error instanceof Error ? error.message : String(error),
+        errorStack:
+          error instanceof Error ? (error.stack?.slice(0, 8000) ?? null) : null,
+        errorCause: this.safeErrorValue(cause),
+      });
+      throw error;
+    }
   }
 
   private async performInitialize() {
@@ -1242,40 +1285,44 @@ export class WhatsAppClientService
     );
   }
 
-  static externalMessageId(message: WebMessage) {
+  static externalMessageId(message: WebMessage | null | undefined) {
     return this.externalMessageIdentity(message).value;
   }
 
-  static externalMessageIdentity(message: WebMessage) {
-    const serialized = this.nonEmptyString(message.id?._serialized);
+  static externalMessageIdentity(message: WebMessage | null | undefined) {
+    const messageId: (WebMessage['id'] & { $1?: unknown }) | undefined =
+      message?.id;
+    const serialized =
+      this.nonEmptyString(messageId?._serialized) ??
+      this.nonEmptyString(messageId?.$1);
     if (serialized) return { value: serialized, source: 'SERIALIZED' as const };
 
-    const innerId = this.nonEmptyString(message.id?.id);
+    const innerId = this.nonEmptyString(message?.id?.id);
     if (innerId) {
       const remote =
-        this.nonEmptyString(message.id?.remote) ??
-        this.nonEmptyString(message.from) ??
+        this.nonEmptyString(message?.id?.remote) ??
+        this.nonEmptyString(message?.from) ??
         'unknown-remote';
       return {
-        value: `wwebjs:${remote}:${message.id?.fromMe === true ? '1' : '0'}:${innerId}`,
+        value: `wwebjs:${remote}:${message?.id?.fromMe === true ? '1' : '0'}:${innerId}`,
         source: 'MESSAGE_ID_PARTS' as const,
       };
     }
 
     const bodyDigest = createHash('sha256')
-      .update(message.body ?? '')
+      .update(message?.body ?? '')
       .digest('hex');
     const fallbackDigest = createHash('sha256')
       .update(
         JSON.stringify({
           provider: 'whatsapp-web.js',
-          from: message.from ?? null,
-          to: message.to ?? null,
-          timestamp: Number.isFinite(message.timestamp)
-            ? message.timestamp
+          from: message?.from ?? null,
+          to: message?.to ?? null,
+          timestamp: Number.isFinite(message?.timestamp)
+            ? message?.timestamp
             : null,
-          type: message.type ?? null,
-          fromMe: message.fromMe === true,
+          type: message?.type ?? null,
+          fromMe: message?.fromMe === true,
           bodyDigest,
         }),
       )
@@ -1288,6 +1335,15 @@ export class WhatsAppClientService
 
   private static nonEmptyString(value: unknown) {
     return typeof value === 'string' && value.trim() ? value.trim() : null;
+  }
+
+  private safeErrorValue(value: unknown) {
+    if (value instanceof Error) {
+      return { name: value.name, message: value.message.slice(0, 2000) };
+    }
+    if (typeof value === 'string') return value.slice(0, 2000);
+    if (value === null || value === undefined) return null;
+    return '[non-error cause]';
   }
 
   static ackStatus(ack: MessageAck) {

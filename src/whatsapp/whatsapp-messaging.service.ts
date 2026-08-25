@@ -118,49 +118,34 @@ export class WhatsAppMessagingService {
       messageId: data.messageId,
       whatsAppMessageId: pending.id,
     });
+    let sent: WebMessage | null | undefined;
     try {
-      const sent = await this.client.sendText(chatId, data.text);
-      const identity = WhatsAppClientService.externalMessageIdentity(sent);
-      if (identity.source === 'FALLBACK_ID') {
-        const whatsappMessage = await this.markOutcomeUnknown(pending.id);
-        this.logger.warn({
-          event: 'WHATSAPP_SEND_OUTCOME_UNKNOWN',
-          conversationId: data.conversationId,
-          messageId: data.messageId,
-          whatsAppMessageId: pending.id,
-          reason: 'PROVIDER_MESSAGE_ID_MISSING',
-        });
-        return {
-          whatsappMessage: this.safeMessage(whatsappMessage),
-          alreadySent: false,
-          outcomePending: true,
-        };
-      }
-      const externalMessageId = identity.value;
-      const whatsappMessage = await this.prisma.whatsAppMessage.update({
-        where: { id: pending.id },
-        data: {
-          externalMessageId,
-          status: WhatsAppMessageStatus.SENT,
-          sentAt: new Date(),
-        },
-      });
+      sent = await this.client.sendText(chatId, data.text);
+    } catch (error) {
+      this.logProviderError(error, pending.id, data);
+      const whatsappMessage = await this.markOutcomeUnknown(
+        pending.id,
+        this.providerErrorMessage(error),
+      );
       return {
         whatsappMessage: this.safeMessage(whatsappMessage),
         alreadySent: false,
-        outcomePending: false,
+        outcomePending: true,
       };
-    } catch (error) {
-      const whatsappMessage = await this.markOutcomeUnknown(pending.id);
+    }
+
+    const identity = WhatsAppClientService.externalMessageIdentity(sent);
+    if (identity.source === 'FALLBACK_ID') {
+      const whatsappMessage = await this.markOutcomeUnknown(
+        pending.id,
+        'WhatsApp provider returned no message ID; automatic retry disabled',
+      );
       this.logger.warn({
         event: 'WHATSAPP_SEND_OUTCOME_UNKNOWN',
-        whatsAppMessageId: pending.id,
         conversationId: data.conversationId,
         messageId: data.messageId,
-        errorCode: this.errorCode(error),
-        errorName: error instanceof Error ? error.name : 'UnknownError',
-        errorMessage:
-          error instanceof Error ? error.message.slice(0, 1000) : 'unknown',
+        whatsAppMessageId: pending.id,
+        reason: 'PROVIDER_MESSAGE_ID_MISSING',
       });
       return {
         whatsappMessage: this.safeMessage(whatsappMessage),
@@ -168,6 +153,21 @@ export class WhatsAppMessagingService {
         outcomePending: true,
       };
     }
+    const externalMessageId = identity.value;
+    const whatsappMessage = await this.prisma.whatsAppMessage.update({
+      where: { id: pending.id },
+      data: {
+        externalMessageId,
+        status: WhatsAppMessageStatus.SENT,
+        sentAt: new Date(),
+        errorMessage: null,
+      },
+    });
+    return {
+      whatsappMessage: this.safeMessage(whatsappMessage),
+      alreadySent: false,
+      outcomePending: false,
+    };
   }
 
   private async createPendingAiMessage(
@@ -814,7 +814,7 @@ export class WhatsAppMessagingService {
     });
   }
 
-  private async markOutcomeUnknown(id: string) {
+  private async markOutcomeUnknown(id: string, errorMessage?: string) {
     await this.prisma.whatsAppMessage.updateMany({
       where: {
         id,
@@ -828,10 +828,41 @@ export class WhatsAppMessagingService {
       data: {
         status: WhatsAppMessageStatus.OUTCOME_UNKNOWN,
         errorMessage:
+          errorMessage ??
           'WhatsApp send outcome is unknown; automatic retry disabled',
       },
     });
     return this.prisma.whatsAppMessage.findUniqueOrThrow({ where: { id } });
+  }
+
+  private logProviderError(
+    error: unknown,
+    whatsAppMessageId: string,
+    data: Pick<SendAiMessageInput, 'conversationId' | 'messageId'>,
+  ) {
+    const cause = error instanceof Error ? error.cause : undefined;
+    this.logger.error({
+      event: 'WHATSAPP_SEND_PROVIDER_ERROR',
+      whatsAppMessageId,
+      conversationId: data.conversationId,
+      messageId: data.messageId,
+      errorCode: this.errorCode(error),
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: error instanceof Error ? error.message : String(error),
+      errorStack: error instanceof Error ? this.safeErrorStack(error) : null,
+      errorCause:
+        cause instanceof Error
+          ? { name: cause.name, message: cause.message.slice(0, 1000) }
+          : typeof cause === 'string'
+            ? cause.slice(0, 1000)
+            : null,
+    });
+  }
+
+  private providerErrorMessage(error: unknown) {
+    const name = error instanceof Error ? error.name : 'UnknownError';
+    const message = error instanceof Error ? error.message : String(error);
+    return `WhatsApp provider error (${name}): ${message}`.slice(0, 4000);
   }
 
   private errorCode(error: unknown) {
