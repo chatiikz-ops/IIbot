@@ -237,11 +237,10 @@ export class ConversationOrchestratorService {
 
     let conversation = target.conversation;
     if (!conversation) {
-      conversation = await this.conversations.create({
-        contactId: target.contactId,
+      conversation = await this.campaigns.createConversationForTarget(
+        target.id,
         strategyCode,
-      });
-      await this.campaigns.attachConversation(target.id, conversation.id);
+      );
     } else if (conversation.strategyCode !== strategyCode) {
       conversation = await this.conversations.ensureStrategy(
         conversation.id,
@@ -746,7 +745,7 @@ export class ConversationOrchestratorService {
     const status = await this.whatsappClient.getStatus();
     if (!status.connected) {
       throw new AutomationJobError(
-        status.lifecycleState === 'INITIALIZING'
+        status.state === 'STARTING'
           ? 'WHATSAPP_INITIALIZING'
           : 'WHATSAPP_NOT_CONNECTED',
         'RETRYABLE',

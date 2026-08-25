@@ -63,8 +63,7 @@ describe('Full sales flow (e2e)', () => {
         Promise.resolve({
           id: { _serialized: `${marker}:${Date.now()}` },
         }),
-      getStatus: () =>
-        Promise.resolve({ connected: true, status: 'CONNECTED' }),
+      getStatus: () => Promise.resolve({ connected: true, state: 'CONNECTED' }),
     };
     const moduleBuilder = Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(WhatsAppClientService)

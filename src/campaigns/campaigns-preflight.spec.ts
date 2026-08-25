@@ -75,7 +75,7 @@ describe('CampaignsService preflight', () => {
     const whatsapp = {
       getStatus: jest.fn().mockResolvedValue({
         connected: options?.whatsapp ?? true,
-        lifecycleState: options?.whatsapp === false ? 'DISCONNECTED' : 'READY',
+        state: options?.whatsapp === false ? 'IDLE' : 'CONNECTED',
       }),
     };
     return {

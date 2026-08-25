@@ -339,7 +339,7 @@ export class CampaignsService {
     if (!automation?.campaignSendingEnabled)
       issue('CAMPAIGN_SENDING_DISABLED', 'Отправка кампаний отключена');
     const whatsappConnected =
-      whatsapp.connected && whatsapp.lifecycleState === 'READY';
+      whatsapp.connected && whatsapp.state === 'CONNECTED';
     if (!whatsappConnected)
       issue('WHATSAPP_NOT_CONNECTED', 'WhatsApp не подключён');
     if (campaign.targets.some((target) => target.contact.deletedAt))
@@ -549,9 +549,72 @@ export class CampaignsService {
   }
 
   attachConversation(targetId: string, conversationId: string) {
-    return this.prisma.campaignTarget.update({
-      where: { id: targetId },
-      data: { conversationId },
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`campaign-target-conversation:${targetId}`}))`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`campaign-conversation-owner:${conversationId}`}))`;
+      const target = await tx.campaignTarget.findUnique({
+        where: { id: targetId },
+        include: { conversation: true },
+      });
+      if (!target) {
+        throw new NotFoundException('Контакт кампании не найден');
+      }
+      if (target.conversation) return target.conversation;
+
+      const proposed = await tx.conversation.findUnique({
+        where: { id: conversationId },
+      });
+      if (!proposed || proposed.contactId !== target.contactId) {
+        throw new ConflictException(
+          'Conversation не принадлежит контакту CampaignTarget',
+        );
+      }
+      const existingOwner = await tx.campaignTarget.findUnique({
+        where: { conversationId },
+        select: { id: true },
+      });
+      const conversation = existingOwner
+        ? await tx.conversation.create({
+            data: {
+              contactId: target.contactId,
+              strategyCode: target.strategyCode ?? proposed.strategyCode,
+              metadata: { source: 'CAMPAIGN_TARGET' },
+            },
+          })
+        : proposed;
+
+      await tx.campaignTarget.update({
+        where: { id: targetId },
+        data: { conversationId: conversation.id },
+      });
+      return conversation;
+    });
+  }
+
+  createConversationForTarget(targetId: string, strategyCode: string) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`campaign-target-conversation:${targetId}`}))`;
+      const target = await tx.campaignTarget.findUnique({
+        where: { id: targetId },
+        include: { conversation: true },
+      });
+      if (!target) {
+        throw new NotFoundException('Контакт кампании не найден');
+      }
+      if (target.conversation) return target.conversation;
+
+      const conversation = await tx.conversation.create({
+        data: {
+          contactId: target.contactId,
+          strategyCode,
+          metadata: { source: 'CAMPAIGN_TARGET', targetId },
+        },
+      });
+      await tx.campaignTarget.update({
+        where: { id: targetId },
+        data: { conversationId: conversation.id },
+      });
+      return conversation;
     });
   }
 

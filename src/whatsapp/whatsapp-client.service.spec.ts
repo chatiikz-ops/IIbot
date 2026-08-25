@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 jest.mock('../prisma/prisma.service', () => ({ PrismaService: class {} }));
 
@@ -28,8 +31,12 @@ class FakeClient extends EventEmitter {
 
 type Internals = {
   createClient: () => FakeClient;
-  lifecycleState: string;
+  state: string;
   generation: number;
+  client: FakeClient | null;
+  authStrategy: { logout: jest.Mock<Promise<void>, []> } | null;
+  acquireRuntimeLock(): void;
+  releaseRuntimeLock(): void;
   withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T>;
 };
 type UpsertArg = {
@@ -45,7 +52,7 @@ describe('WhatsAppClientService lifecycle', () => {
 
   beforeEach(() => {
     clients = [];
-    session = { status: WhatsAppConnectionStatus.DISCONNECTED };
+    session = { status: WhatsAppConnectionStatus.IDLE };
     upsert = jest.fn(({ create, update }: UpsertArg) => {
       session = {
         ...session,
@@ -104,18 +111,19 @@ describe('WhatsAppClientService lifecycle', () => {
     await Promise.all([first, second]);
   });
 
-  it('keeps initialization pending after QR', async () => {
+  it('completes initialization with QR_REQUIRED after QR', async () => {
     const operation = service.initialize();
     let settled = false;
     void operation.then(() => (settled = true));
     await tick();
     clients[0].emit('qr', 'raw-qr');
     const availableQr = await waitForQr();
-    expect(settled).toBe(false);
+    await operation;
+    expect(settled).toBe(true);
     expect(availableQr).toMatchObject({
       available: true,
       generation: 1,
-      lifecycleState: 'INITIALIZING',
+      state: 'QR_REQUIRED',
     });
     expect((availableQr as { qrDataUrl: string }).qrDataUrl).toMatch(
       /^data:image\/png;base64,/,
@@ -129,12 +137,12 @@ describe('WhatsAppClientService lifecycle', () => {
     clients[0].emit('auth_failure', 'bad session');
     await tick();
     expect(service.getQr()).toMatchObject({ available: false });
-    expect(session.status).toBe(WhatsAppConnectionStatus.AUTH_FAILURE);
+    expect(session.status).toBe(WhatsAppConnectionStatus.ERROR);
 
     clients[0].emit('qr', 'fresh-qr');
     await waitForQr();
     await expect(service.getStatus()).resolves.toMatchObject({
-      status: WhatsAppConnectionStatus.QR_REQUIRED,
+      state: 'QR_REQUIRED',
       qrAvailable: true,
     });
     await ready();
@@ -159,7 +167,7 @@ describe('WhatsAppClientService lifecycle', () => {
     clients[0].emit('authenticated');
     await tick();
     await expect(service.getStatus()).resolves.toMatchObject({
-      status: WhatsAppConnectionStatus.AUTHENTICATING,
+      state: 'AUTHENTICATING',
       connected: false,
     });
 
@@ -167,9 +175,9 @@ describe('WhatsAppClientService lifecycle', () => {
     await operation;
 
     await expect(service.getStatus()).resolves.toMatchObject({
-      status: WhatsAppConnectionStatus.CONNECTED,
+      state: 'CONNECTED',
       connected: true,
-      lifecycleState: 'READY',
+      state: 'CONNECTED',
       phoneNumber: '+77001234567',
       displayName: 'Test',
       qrAvailable: false,
@@ -186,9 +194,9 @@ describe('WhatsAppClientService lifecycle', () => {
     await tick();
 
     await expect(service.getStatus()).resolves.toMatchObject({
-      status: WhatsAppConnectionStatus.CONNECTED,
+      state: 'CONNECTED',
       connected: true,
-      lifecycleState: 'READY',
+      state: 'CONNECTED',
     });
     expect(session.status).toBe(WhatsAppConnectionStatus.CONNECTED);
   });
@@ -217,7 +225,7 @@ describe('WhatsAppClientService lifecycle', () => {
     clients[0].emit('disconnected', 'NAVIGATION');
     await tick();
     const writes = upsert.mock.calls.filter(
-      ([arg]) => arg.update.status === WhatsAppConnectionStatus.DISCONNECTED,
+      ([arg]) => arg.update.status === WhatsAppConnectionStatus.IDLE,
     );
     expect(writes).toHaveLength(1);
   });
@@ -239,8 +247,8 @@ describe('WhatsAppClientService lifecycle', () => {
     const initialization = service.initialize();
     const destruction = service.destroy();
     await Promise.all([initialization, destruction]);
-    expect(clients[0].destroy).toHaveBeenCalledTimes(1);
-    expect((service as unknown as Internals).lifecycleState).toBe('IDLE');
+    if (clients[0]) expect(clients[0].destroy).toHaveBeenCalledTimes(1);
+    expect((service as unknown as Internals).state).toBe('IDLE');
   });
 
   it('completes normal destroy quickly and persists DISCONNECTED', async () => {
@@ -250,7 +258,7 @@ describe('WhatsAppClientService lifecycle', () => {
     const startedAt = Date.now();
     await service.destroy();
     expect(Date.now() - startedAt).toBeLessThan(1000);
-    expect(session.status).toBe(WhatsAppConnectionStatus.DISCONNECTED);
+    expect(session.status).toBe(WhatsAppConnectionStatus.IDLE);
     expect(clients[0].logout).not.toHaveBeenCalled();
   });
 
@@ -266,8 +274,8 @@ describe('WhatsAppClientService lifecycle', () => {
     await jest.advanceTimersByTimeAsync(4001);
     await destruction;
     jest.useRealTimers();
-    expect(session.status).toBe(WhatsAppConnectionStatus.DISCONNECTED);
-    expect((service as unknown as Internals).lifecycleState).toBe('IDLE');
+    expect(session.status).toBe(WhatsAppConnectionStatus.IDLE);
+    expect((service as unknown as Internals).state).toBe('IDLE');
   });
 
   it('bounds forced Chromium close and remains idempotent', async () => {
@@ -284,7 +292,7 @@ describe('WhatsAppClientService lifecycle', () => {
     await destruction;
     await service.destroy();
     jest.useRealTimers();
-    expect(session.status).toBe(WhatsAppConnectionStatus.DISCONNECTED);
+    expect(session.status).toBe(WhatsAppConnectionStatus.IDLE);
     expect(clients[0].destroy).toHaveBeenCalledTimes(1);
   });
 
@@ -300,7 +308,7 @@ describe('WhatsAppClientService lifecycle', () => {
     await reconnect;
     await expect(service.getStatus()).resolves.toMatchObject({
       connected: true,
-      lifecycleState: 'READY',
+      state: 'CONNECTED',
     });
     expect(clients[0].logout).not.toHaveBeenCalled();
   });
@@ -314,8 +322,8 @@ describe('WhatsAppClientService lifecycle', () => {
 
     expect(clients[0].destroy).toHaveBeenCalledTimes(1);
     expect(clients[0].logout).not.toHaveBeenCalled();
-    expect((service as unknown as Internals).lifecycleState).toBe('IDLE');
-    expect(session.status).toBe(WhatsAppConnectionStatus.CONNECTED);
+    expect((service as unknown as Internals).state).toBe('IDLE');
+    expect(session.status).toBe(WhatsAppConnectionStatus.IDLE);
   });
 
   it('a new service generation restores a preserved LocalAuth session to READY', async () => {
@@ -352,7 +360,7 @@ describe('WhatsAppClientService lifecycle', () => {
     await restoredInitialization;
 
     await expect(restored.getStatus()).resolves.toMatchObject({
-      status: WhatsAppConnectionStatus.CONNECTED,
+      state: 'CONNECTED',
       generation: 1,
     });
     await restored.onApplicationShutdown();
@@ -363,8 +371,8 @@ describe('WhatsAppClientService lifecycle', () => {
     await tick();
     clients[0].emit('auth_failure', 'bad session');
     await operation;
-    expect(session.status).toBe(WhatsAppConnectionStatus.AUTH_FAILURE);
-    expect((service as unknown as Internals).lifecycleState).toBe('FAILED');
+    expect(session.status).toBe(WhatsAppConnectionStatus.ERROR);
+    expect((service as unknown as Internals).state).toBe('ERROR');
   });
 
   it('contains an initialize rejection and reports ERROR', async () => {
@@ -375,7 +383,7 @@ describe('WhatsAppClientService lifecycle', () => {
       return client;
     };
     await expect(service.initialize()).resolves.toMatchObject({
-      status: WhatsAppConnectionStatus.ERROR,
+      state: 'ERROR',
     });
   });
 
@@ -441,6 +449,97 @@ describe('WhatsAppClientService lifecycle', () => {
     service.getQr();
     await service.getStatus();
     expect(clients).toHaveLength(0);
+  });
+
+  it('rejects outbound in every non-CONNECTED state and allows it when connected', async () => {
+    await expect(
+      service.sendText('77001234567@c.us', 'hello'),
+    ).rejects.toMatchObject({
+      // Jest's asymmetric matcher is intentionally dynamic at this boundary.
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      response: expect.objectContaining({ code: 'WHATSAPP_NOT_CONNECTED' }),
+    });
+    const operation = service.initialize();
+    await ready();
+    await operation;
+    await expect(
+      service.sendText('77001234567@c.us', 'hello'),
+    ).resolves.toEqual({ id: 'sent' });
+  });
+
+  it('keeps runtime CONNECTED when persistence fails after ready', async () => {
+    upsert.mockImplementationOnce(() => Promise.resolve(session));
+    upsert.mockImplementationOnce(() => Promise.reject(new Error('db down')));
+    const operation = service.initialize();
+    await ready();
+    await operation;
+    await expect(service.getStatus()).resolves.toMatchObject({
+      state: 'CONNECTED',
+      connected: true,
+    });
+  });
+
+  it('ignores a stale disconnected event after a new generation is connected', async () => {
+    const initial = service.initialize();
+    await ready();
+    await initial;
+    const reconnect = service.reconnect();
+    await tick();
+    await ready(clients[1]);
+    await reconnect;
+    clients[0].emit('disconnected', 'late-old-client-event');
+    await tick();
+    await expect(service.getStatus()).resolves.toMatchObject({
+      state: 'CONNECTED',
+      generation: 2,
+    });
+  });
+
+  it('logout removes LocalAuth and the following initialize requests a QR', async () => {
+    const initial = service.initialize();
+    await ready();
+    await initial;
+    const removeLocalAuth = jest.fn(() => Promise.resolve());
+    (service as unknown as Internals).authStrategy = {
+      logout: removeLocalAuth,
+    };
+    await service.logout();
+    expect(removeLocalAuth).toHaveBeenCalledTimes(1);
+    const next = service.initialize();
+    await tick();
+    clients[1].emit('qr', 'new-login');
+    await next;
+    await expect(service.getStatus()).resolves.toMatchObject({
+      state: 'QR_REQUIRED',
+      qrAvailable: true,
+    });
+  });
+
+  it('recovers stale runtime locks and rejects an active lock', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'whatsapp-lock-'));
+    const lockPath = join(directory, '.runtime-test.lock');
+    const makeLockService = () =>
+      new WhatsAppClientService(
+        {} as never,
+        {
+          enabled: true,
+          clientId: 'test',
+          sessionPath: directory,
+          runtimeLockPath: lockPath,
+        } as never,
+      ) as unknown as Internals;
+    try {
+      writeFileSync(lockPath, JSON.stringify({ pid: 2147483647 }));
+      const owner = makeLockService();
+      expect(() => owner.acquireRuntimeLock()).not.toThrow();
+      const contender = makeLockService();
+      expect(() => contender.acquireRuntimeLock()).toThrow(
+        /owned by backend PID/,
+      );
+      owner.releaseRuntimeLock();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it('resolves a LID through the provider once and reuses the cache', async () => {

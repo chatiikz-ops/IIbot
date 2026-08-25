@@ -16,21 +16,23 @@ import {
   MessageTypes,
   type Message as WebMessage,
 } from 'whatsapp-web.js';
-import { WhatsAppConnectionStatus } from '../generated/prisma/enums';
 import { PrismaService } from '../prisma/prisma.service';
 import { WhatsAppConfigService } from './whatsapp-config.service';
 
 type MessageHandler = (message: WebMessage) => Promise<void>;
 type AckHandler = (message: WebMessage, ack: MessageAck) => Promise<void>;
-type LifecycleState =
+export type WhatsAppRuntimeState =
+  | 'DISABLED'
   | 'IDLE'
-  | 'INITIALIZING'
-  | 'READY'
-  | 'DISCONNECTED'
-  | 'FAILED'
+  | 'STARTING'
+  | 'QR_REQUIRED'
+  | 'AUTHENTICATING'
+  | 'CONNECTED'
   | 'DISCONNECTING'
-  | 'LOGGING_OUT';
-type InitializationOutcome = 'READY' | 'FAILED' | 'CANCELLED';
+  | 'LOGGING_OUT'
+  | 'ERROR';
+type InitializationOutcome =
+  'CONNECTED' | 'QR_REQUIRED' | 'ERROR' | 'CANCELLED';
 
 @Injectable()
 export class WhatsAppClientService
@@ -40,27 +42,24 @@ export class WhatsAppClientService
   private readonly logger = new Logger(WhatsAppClientService.name);
   private client: Client | null = null;
   private authStrategy: LocalAuth | null = null;
-  private initializationPromise: Promise<unknown> | null = null;
-  private reconnectPromise: Promise<unknown> | null = null;
-  private lifecyclePromise: Promise<unknown> | null = null;
-  private lifecycleState: LifecycleState = 'IDLE';
+  private currentOperation: {
+    kind: 'INITIALIZE' | 'RECONNECT' | 'DESTROY' | 'LOGOUT';
+    promise: Promise<unknown>;
+  } | null = null;
+  private state: WhatsAppRuntimeState = 'IDLE';
   private currentQrDataUrl: string | null = null;
   private currentQrCreatedAt: Date | null = null;
   private currentQrGeneration: number | null = null;
   private qrEventSequence = 0;
-  private status: WhatsAppConnectionStatus = WhatsAppConnectionStatus.DISABLED;
   private readonly messageHandlers: MessageHandler[] = [];
   private readonly ackHandlers: AckHandler[] = [];
   private generation = 0;
-  private readyGeneration = 0;
-  private readyEventGeneration = 0;
-  private disconnectedGeneration = 0;
-  private initializationWaiter: {
+  private operationCompletion: {
     generation: number;
     resolve: (outcome: InitializationOutcome) => void;
   } | null = null;
   private readonly boundClients = new WeakSet<Client>();
-  private lifecycleEventQueue: Promise<void> = Promise.resolve();
+  private eventQueue: Promise<void> = Promise.resolve();
   private ownsRuntimeLock = false;
 
   constructor(
@@ -74,7 +73,7 @@ export class WhatsAppClientService
       (process.env.NODE_ENV !== 'test' ||
         process.env.WHATSAPP_TEST_RUNTIME_ENABLED === 'true');
     if (!runtimeEnabled) {
-      this.status = WhatsAppConnectionStatus.DISABLED;
+      this.state = 'DISABLED';
       return;
     }
     this.acquireRuntimeLock();
@@ -86,24 +85,22 @@ export class WhatsAppClientService
       headless: this.config.headless,
       initTimeoutMs: this.config.initTimeoutMs,
     });
-    this.status = this.config.enabled
-      ? WhatsAppConnectionStatus.DISCONNECTED
-      : WhatsAppConnectionStatus.DISABLED;
+    this.state = this.config.enabled ? 'IDLE' : 'DISABLED';
     await this.prisma.whatsAppSession.upsert({
       where: { clientId: this.config.clientId },
-      create: { clientId: this.config.clientId, status: this.status },
-      update: { status: this.status, lastError: null },
+      create: { clientId: this.config.clientId, status: this.state },
+      update: { status: this.state, lastError: null },
     });
     if (this.config.enabled) {
       void this.initialize().catch((error: unknown) => {
-        this.lifecycleState = 'FAILED';
+        this.state = 'ERROR';
         this.logLifecycle(
           'bootstrap_initialization_rejected',
           this.generation,
           'error',
           error,
         );
-        void this.setStatus(WhatsAppConnectionStatus.ERROR, {
+        void this.transitionTo('ERROR', {
           lastError: 'WhatsApp bootstrap initialization failed',
         }).catch((statusError: unknown) => {
           this.logLifecycle(
@@ -142,7 +139,7 @@ export class WhatsAppClientService
       return { lid, chatId: cached, source: 'CACHE' as const };
     }
     const client = this.client;
-    if (!client || this.lifecycleState !== 'READY') return null;
+    if (!client || this.state !== 'CONNECTED') return null;
     const mappings = await client.getContactLidAndPhone([lid]);
     const mapping = mappings.find((item) => item.lid === lid) ?? mappings[0];
     const chatId = this.validPhoneChatId(mapping?.pn);
@@ -160,117 +157,106 @@ export class WhatsAppClientService
 
   initialize() {
     if (!this.config.enabled) return this.getStatus();
-    if (this.initializationPromise) return this.initializationPromise;
+    if (this.currentOperation?.kind === 'INITIALIZE') {
+      return this.currentOperation.promise;
+    }
+    if (this.currentOperation) this.operationConflict('initialize');
     this.assertLifecycleAvailable('initialize');
     if (this.client) return this.getStatus();
     if (!this.ownsRuntimeLock && this.config.runtimeLockPath)
       this.acquireRuntimeLock();
 
     const operation = this.performInitialize();
-    this.initializationPromise = operation;
-    const clearInitialization = () => {
-      if (this.initializationPromise === operation) {
-        this.initializationPromise = null;
-      }
-    };
-    void operation.then(clearInitialization, clearInitialization);
-    return operation;
+    return this.trackOperation('INITIALIZE', operation);
   }
 
   async reconnect() {
     if (!this.config.enabled) return this.getStatus();
-    if (this.reconnectPromise) return this.reconnectPromise;
-    const operation = this.performReconnect().then(() => this.getStatus());
-    this.reconnectPromise = operation;
-    void operation
-      .finally(() => {
-        if (this.reconnectPromise === operation) this.reconnectPromise = null;
-      })
-      .catch(() => undefined);
+    if (this.currentOperation?.kind === 'RECONNECT') {
+      await this.currentOperation.promise;
+      return this.getStatus();
+    }
+    const previousOperation = this.currentOperation?.promise ?? null;
+    const operation = this.performReconnect(previousOperation).then(() =>
+      this.getStatus(),
+    );
+    void this.trackOperation('RECONNECT', operation);
     await operation;
     return this.getStatus();
   }
 
   async destroy() {
-    if (this.lifecycleState === 'DISCONNECTING' && this.lifecyclePromise) {
-      await this.lifecyclePromise;
+    if (this.currentOperation?.kind === 'DESTROY') {
+      await this.currentOperation.promise;
       return this.getStatus();
     }
     if (
-      this.lifecycleState !== 'INITIALIZING' &&
-      this.lifecycleState !== 'DISCONNECTED' &&
-      this.lifecycleState !== 'FAILED'
+      this.state !== 'STARTING' &&
+      this.state !== 'IDLE' &&
+      this.state !== 'ERROR'
     ) {
       this.assertLifecycleAvailable('destroy');
     }
-    const operation = this.trackLifecycle(this.performDestroy(true));
+    const previousOperation = this.currentOperation?.promise ?? null;
+    const operation = this.trackOperation(
+      'DESTROY',
+      this.performDestroy(true, previousOperation),
+    );
     await operation;
     return this.getStatus();
   }
 
   async logout() {
+    if (this.currentOperation?.kind === 'LOGOUT') {
+      await this.currentOperation.promise;
+      return this.getStatus();
+    }
+    if (this.currentOperation) this.operationConflict('logout');
     this.assertLifecycleAvailable('logout');
     if (!this.client || !this.authStrategy) {
       throw new ConflictException('WhatsApp client не запущен');
     }
-    const operation = this.trackLifecycle(this.performLogout());
+    const operation = this.trackOperation('LOGOUT', this.performLogout());
     await operation;
     return this.getStatus();
   }
 
   async getStatus() {
-    let session = await this.prisma.whatsAppSession.findUnique({
+    const session = await this.prisma.whatsAppSession.findUnique({
       where: { clientId: this.config.clientId },
     });
-    if (
-      this.lifecycleState === 'READY' &&
-      this.client &&
-      (this.status !== WhatsAppConnectionStatus.CONNECTED ||
-        session?.status !== WhatsAppConnectionStatus.CONNECTED)
-    ) {
+    if (session && session.status !== this.state) {
       this.logger.warn({
         event: 'WHATSAPP_STATE_INVARIANT_VIOLATION',
         clientInstanceId: `${this.config.clientId}:${this.generation}`,
         generation: this.generation,
-        lifecycleState: this.lifecycleState,
-        runtimeStatus: this.status,
+        runtimeState: this.state,
         persistedStatus: session?.status ?? null,
       });
-      await this.setStatus(WhatsAppConnectionStatus.CONNECTED);
-      session = await this.prisma.whatsAppSession.findUnique({
-        where: { clientId: this.config.clientId },
-      });
+      void this.persistState(this.state).catch(() => undefined);
     }
     const qrAvailable = this.isQrAvailable();
-    const status = qrAvailable
-      ? WhatsAppConnectionStatus.QR_REQUIRED
-      : this.status;
     return {
       enabled: this.config.enabled,
-      status,
-      connected: status === WhatsAppConnectionStatus.CONNECTED,
+      state: this.state,
+      connected: this.state === 'CONNECTED',
       phoneNumber: session?.phoneNumber ?? null,
       displayName: session?.displayName ?? null,
       lastConnectedAt: session?.lastConnectedAt ?? null,
       lastDisconnectedAt: session?.lastDisconnectedAt ?? null,
       qrAvailable,
-      ready: status === WhatsAppConnectionStatus.CONNECTED,
-      hasQr: qrAvailable,
-      phone: session?.phoneNumber ?? null,
-      name: session?.displayName ?? null,
-      lastError: qrAvailable ? null : (session?.lastError ?? null),
-      lifecycleState: this.lifecycleState,
+      lastError: this.state === 'ERROR' ? (session?.lastError ?? null) : null,
       generation: this.generation,
     };
   }
 
   getQr() {
-    if (this.status === WhatsAppConnectionStatus.CONNECTED) {
+    if (this.state === 'CONNECTED') {
       return {
         available: false,
         reason: 'ALREADY_CONNECTED',
         generation: this.generation,
-        lifecycleState: this.lifecycleState,
+        state: this.state,
       };
     }
     if (this.currentQrDataUrl && this.currentQrCreatedAt) {
@@ -284,25 +270,22 @@ export class WhatsAppClientService
           createdAt: this.currentQrCreatedAt,
           expiresAt,
           generation: this.currentQrGeneration,
-          lifecycleState: this.lifecycleState,
+          state: this.state,
         };
       }
       return {
         available: false,
         reason: 'EXPIRED',
         generation: this.generation,
-        lifecycleState: this.lifecycleState,
+        state: this.state,
       };
     }
-    if (
-      this.status === WhatsAppConnectionStatus.INITIALIZING ||
-      this.status === WhatsAppConnectionStatus.AUTHENTICATING
-    ) {
+    if (this.state === 'STARTING' || this.state === 'AUTHENTICATING') {
       return {
         available: false,
-        reason: 'INITIALIZING',
+        reason: 'STARTING',
         generation: this.generation,
-        lifecycleState: this.lifecycleState,
+        state: this.state,
       };
     }
     if (!this.config.enabled)
@@ -310,13 +293,13 @@ export class WhatsAppClientService
         available: false,
         reason: 'DISABLED',
         generation: this.generation,
-        lifecycleState: this.lifecycleState,
+        state: this.state,
       };
     return {
       available: false,
       reason: 'NOT_AVAILABLE',
       generation: this.generation,
-      lifecycleState: this.lifecycleState,
+      state: this.state,
     };
   }
 
@@ -331,14 +314,25 @@ export class WhatsAppClientService
   }
 
   private async performInitialize() {
-    this.lifecycleState = 'INITIALIZING';
-    await this.setStatus(WhatsAppConnectionStatus.INITIALIZING);
+    const startedAt = Date.now();
+    this.logLifecycle('WHATSAPP_INITIALIZE_STARTED', this.generation);
+    await this.transitionTo('STARTING');
+    if (this.state !== 'STARTING') return this.getStatus();
     try {
       await this.launchClientWithLockRetry();
     } finally {
-      if (this.lifecycleState === 'INITIALIZING') {
-        this.lifecycleState = this.client ? 'FAILED' : 'IDLE';
+      if (this.state === 'STARTING') {
+        this.state = this.client ? 'ERROR' : 'IDLE';
       }
+      this.logLifecycle(
+        this.state === 'ERROR'
+          ? 'WHATSAPP_INITIALIZE_FAILED'
+          : 'WHATSAPP_INITIALIZE_COMPLETED',
+        this.generation,
+        this.state === 'ERROR' ? 'error' : 'log',
+        undefined,
+        { durationMs: Date.now() - startedAt },
+      );
     }
     return this.getStatus();
   }
@@ -357,7 +351,7 @@ export class WhatsAppClientService
       this.client = client;
       this.authStrategy = authStrategy;
       this.bindEvents(client, generation);
-      this.logLifecycle('client_created', generation);
+      this.logLifecycle('WHATSAPP_CLIENT_CREATED', generation);
 
       const statePromise = this.waitForInitializationOutcome(generation);
       const runtimePromise = Promise.resolve().then(() => client.initialize());
@@ -384,7 +378,7 @@ export class WhatsAppClientService
           await this.delay(750);
           continue;
         }
-        await this.setStatus(WhatsAppConnectionStatus.ERROR, {
+        await this.transitionTo('ERROR', {
           lastError: this.isLockError(first.error)
             ? 'WhatsApp LocalAuth session is used by another process'
             : 'WhatsApp client initialization failed',
@@ -394,18 +388,20 @@ export class WhatsAppClientService
 
       const outcome =
         first.kind === 'state' ? first.outcome : await statePromise;
-      if (outcome !== 'READY') {
+      if (outcome === 'QR_REQUIRED') {
+        void runtimePromise.catch((error: unknown) => {
+          void this.safelyHandleRuntimeFailure(client, generation, error);
+        });
+        return;
+      }
+      if (outcome !== 'CONNECTED') {
         await this.closeFailedClient(client, generation);
-        if (
-          outcome !== 'CANCELLED' &&
-          this.status !== WhatsAppConnectionStatus.AUTH_FAILURE &&
-          this.status !== WhatsAppConnectionStatus.DISCONNECTED
-        ) {
-          await this.setStatus(WhatsAppConnectionStatus.ERROR, {
+        if (outcome !== 'CANCELLED' && this.state !== 'ERROR') {
+          await this.transitionTo('ERROR', {
             lastError: 'WhatsApp client initialization failed or timed out',
           });
         }
-        this.lifecycleState = outcome === 'CANCELLED' ? 'IDLE' : 'FAILED';
+        this.state = outcome === 'CANCELLED' ? 'IDLE' : 'ERROR';
         return;
       }
 
@@ -416,28 +412,40 @@ export class WhatsAppClientService
     }
   }
 
-  private async performReconnect() {
+  private async performReconnect(previousOperation: Promise<unknown> | null) {
+    const startedAt = Date.now();
+    this.logLifecycle('WHATSAPP_RECONNECT_STARTED', this.generation);
+    await this.transitionTo('DISCONNECTING');
     this.cancelInitialization();
-    if (this.initializationPromise) {
-      await this.initializationPromise.catch(() => undefined);
+    if (previousOperation) {
+      await previousOperation.catch(() => undefined);
     }
-    this.lifecycleState = 'DISCONNECTING';
     if (this.client) await this.closeCurrentClient();
     if (!this.ownsRuntimeLock && this.config.runtimeLockPath)
       this.acquireRuntimeLock();
-    this.lifecycleState = 'INITIALIZING';
-    await this.setStatus(WhatsAppConnectionStatus.INITIALIZING);
+    await this.transitionTo('STARTING');
     try {
       await this.launchClientWithLockRetry();
     } finally {
-      if (this.lifecycleState === 'INITIALIZING')
-        this.lifecycleState = 'FAILED';
+      if (this.state === 'STARTING') this.state = 'ERROR';
+      this.logLifecycle(
+        this.state === 'ERROR'
+          ? 'WHATSAPP_RECONNECT_FAILED'
+          : 'WHATSAPP_RECONNECT_COMPLETED',
+        this.generation,
+        this.state === 'ERROR' ? 'error' : 'log',
+        undefined,
+        { durationMs: Date.now() - startedAt },
+      );
     }
   }
 
-  private async performDestroy(updateStatus: boolean) {
+  private async performDestroy(
+    updateStatus: boolean,
+    previousOperation: Promise<unknown> | null,
+  ) {
     const startedAt = Date.now();
-    this.lifecycleState = 'DISCONNECTING';
+    await this.transitionTo('DISCONNECTING');
     this.logLifecycle(
       'WHATSAPP_DISCONNECT_STARTED',
       this.generation,
@@ -446,10 +454,10 @@ export class WhatsAppClientService
       { stage: 'disconnect', durationMs: 0 },
     );
     this.cancelInitialization();
-    if (this.initializationPromise) {
+    if (previousOperation) {
       try {
         await this.withTimeout(
-          this.initializationPromise.catch(() => undefined),
+          previousOperation.catch(() => undefined),
           5000,
         );
       } catch {
@@ -460,12 +468,13 @@ export class WhatsAppClientService
       if (this.client) await this.closeCurrentClient();
       this.clearQr();
       if (updateStatus && this.config.enabled) {
-        await this.setStatus(WhatsAppConnectionStatus.DISCONNECTED, {
+        await this.transitionTo('IDLE', {
           lastDisconnectedAt: new Date(),
         });
       }
     } finally {
-      this.lifecycleState = this.client ? 'READY' : 'IDLE';
+      if (this.client) await this.transitionTo('CONNECTED');
+      else if (this.state !== 'IDLE') await this.transitionTo('IDLE');
       this.releaseRuntimeLock();
       this.logLifecycle(
         'WHATSAPP_RUNTIME_LOCK_RELEASED',
@@ -485,7 +494,9 @@ export class WhatsAppClientService
   }
 
   private async performLogout() {
-    this.lifecycleState = 'LOGGING_OUT';
+    const startedAt = Date.now();
+    await this.transitionTo('LOGGING_OUT');
+    this.logLifecycle('WHATSAPP_LOGOUT_STARTED', this.generation, 'log');
     const client = this.client!;
     const authStrategy = this.authStrategy!;
     const authWithLogout = authStrategy as unknown as {
@@ -530,7 +541,7 @@ export class WhatsAppClientService
         try {
           await this.removeLocalAuthWithRetry(removeLocalAuth);
         } catch {
-          await this.setStatus(WhatsAppConnectionStatus.ERROR, {
+          await this.transitionTo('ERROR', {
             lastError: 'LocalAuth could not be removed after Chromium shutdown',
           });
           throw new ServiceUnavailableException(
@@ -538,7 +549,7 @@ export class WhatsAppClientService
           );
         }
         localAuthRemoved = true;
-        await this.setStatus(WhatsAppConnectionStatus.DISCONNECTED, {
+        await this.transitionTo('IDLE', {
           phoneNumber: null,
           displayName: null,
           lastDisconnectedAt: new Date(),
@@ -548,7 +559,7 @@ export class WhatsAppClientService
       }
 
       if (runtimeDestroyCompleted) {
-        await this.setStatus(WhatsAppConnectionStatus.DISCONNECTED, {
+        await this.transitionTo('IDLE', {
           lastDisconnectedAt: new Date(),
           lastError: 'WhatsApp logout failed; LocalAuth was preserved',
         });
@@ -564,7 +575,16 @@ export class WhatsAppClientService
       if (!localAuthRemoved) {
         authWithLogout.logout = originalLogout;
       }
-      this.lifecycleState = this.client ? 'READY' : 'IDLE';
+      if (this.client) await this.transitionTo('CONNECTED');
+      else if (this.state !== 'IDLE') await this.transitionTo('IDLE');
+      this.releaseRuntimeLock();
+      this.logLifecycle(
+        'WHATSAPP_LOGOUT_COMPLETED',
+        this.generation,
+        'log',
+        undefined,
+        { durationMs: Date.now() - startedAt },
+      );
     }
   }
 
@@ -670,23 +690,17 @@ export class WhatsAppClientService
 
   private async shutdownRuntime() {
     this.cancelInitialization();
-    if (this.initializationPromise) {
+    if (this.currentOperation) {
       await Promise.race([
-        this.initializationPromise.catch(() => undefined),
-        this.delay(5000),
-      ]);
-    }
-    if (this.lifecyclePromise) {
-      await Promise.race([
-        this.lifecyclePromise.catch(() => undefined),
+        this.currentOperation.promise.catch(() => undefined),
         this.delay(5000),
       ]);
     }
     const client = this.client;
     if (!client) return;
-    this.lifecycleState = 'DISCONNECTING';
+    await this.transitionTo('DISCONNECTING');
     await this.closeFailedClient(client);
-    this.lifecycleState = 'IDLE';
+    await this.transitionTo('IDLE', { lastDisconnectedAt: new Date() });
   }
 
   private bindEvents(client: Client, generation: number) {
@@ -709,12 +723,12 @@ export class WhatsAppClientService
     });
     client.on('auth_failure', () => {
       this.enqueueLifecycleEvent(client, generation, async () => {
-        if (this.readyEventGeneration === generation) return;
-        this.lifecycleState = 'FAILED';
+        if (this.state === 'CONNECTED') return;
         this.clearQr();
-        await this.setStatus(WhatsAppConnectionStatus.AUTH_FAILURE, {
+        await this.transitionTo('ERROR', {
           lastError: 'WhatsApp authentication failed',
         });
+        this.logLifecycle('WHATSAPP_AUTH_FAILURE', generation, 'warn');
       });
     });
     client.on('disconnected', () => {
@@ -723,11 +737,12 @@ export class WhatsAppClientService
       );
     });
     client.on('change_state', (state) => {
-      if (this.client === client && this.generation === generation) {
+      this.enqueueLifecycleEvent(client, generation, () => {
         this.logLifecycle('state_changed', generation, 'log', undefined, {
           whatsappState: String(state),
         });
-      }
+        return Promise.resolve();
+      });
     });
     client.on('message', (message) => {
       for (const handler of this.messageHandlers) {
@@ -756,68 +771,62 @@ export class WhatsAppClientService
         this.client !== client ||
         this.generation !== generation ||
         this.qrEventSequence !== qrEventSequence ||
-        this.lifecycleState === 'READY'
+        this.state === 'CONNECTED'
       )
         return;
       this.currentQrDataUrl = qrDataUrl;
       this.currentQrCreatedAt = new Date();
       this.currentQrGeneration = generation;
-      this.lifecycleState = 'INITIALIZING';
-      await this.setStatus(WhatsAppConnectionStatus.QR_REQUIRED, {
+      await this.transitionTo('QR_REQUIRED', {
         lastQrAt: this.currentQrCreatedAt,
         lastError: null,
       });
-      this.logLifecycle('qr_ready', generation);
+      this.resolveInitialization(generation, 'QR_REQUIRED');
+      this.logLifecycle('WHATSAPP_QR_CREATED', generation);
     } catch {
-      await this.setStatus(WhatsAppConnectionStatus.ERROR, {
+      await this.transitionTo('ERROR', {
         lastError: 'Failed to generate WhatsApp QR image',
       });
     }
   }
 
   private async handleReady(client: Client, generation: number) {
-    if (this.readyEventGeneration === generation) return;
-    this.readyEventGeneration = generation;
+    if (this.state === 'CONNECTED') return;
     this.clearQr();
     const lastConnectedAt = new Date();
     const phoneNumber = client.info?.wid?.user
       ? `+${client.info.wid.user}`
       : null;
-    await this.setStatus(WhatsAppConnectionStatus.CONNECTED, {
+    await this.transitionTo('CONNECTED', {
       phoneNumber,
       displayName: client.info?.pushname ?? null,
       lastConnectedAt,
       lastError: null,
     });
-    this.readyGeneration = generation;
-    this.lifecycleState = 'READY';
-    this.resolveInitialization(generation, 'READY');
-    this.logLifecycle('connected', generation);
+    this.resolveInitialization(generation, 'CONNECTED');
+    this.logLifecycle('WHATSAPP_READY', generation);
   }
 
   private async handleAuthenticated(client: Client, generation: number) {
     if (
       this.client !== client ||
       this.generation !== generation ||
-      this.readyGeneration === generation ||
-      this.readyEventGeneration === generation ||
-      this.lifecycleState === 'READY'
+      this.state === 'CONNECTED'
     ) {
       return;
     }
-    await this.setStatus(WhatsAppConnectionStatus.AUTHENTICATING);
+    await this.transitionTo('AUTHENTICATING');
+    this.logLifecycle('WHATSAPP_AUTHENTICATED', generation);
   }
 
   private async handleDisconnected(generation: number) {
-    if (this.disconnectedGeneration === generation) return;
-    this.disconnectedGeneration = generation;
-    this.lifecycleState = 'DISCONNECTED';
+    if (this.state === 'IDLE') return;
     this.clearQr();
-    await this.setStatus(WhatsAppConnectionStatus.DISCONNECTED, {
+    await this.transitionTo('IDLE', {
       lastDisconnectedAt: new Date(),
     });
-    this.resolveInitialization(generation, 'FAILED');
-    this.logLifecycle('disconnected', generation, 'warn');
+    this.resolveInitialization(generation, 'ERROR');
+    this.logLifecycle('WHATSAPP_DISCONNECTED', generation, 'warn');
   }
 
   private async handleUnexpectedRuntimeFailure(
@@ -827,20 +836,19 @@ export class WhatsAppClientService
   ) {
     if (
       this.client !== client ||
-      this.lifecycleState === 'DISCONNECTING' ||
-      this.lifecycleState === 'LOGGING_OUT'
+      this.state === 'DISCONNECTING' ||
+      this.state === 'LOGGING_OUT'
     ) {
       return;
     }
-    this.lifecycleState = 'DISCONNECTING';
-    this.resolveInitialization(generation, 'FAILED');
+    this.state = 'DISCONNECTING';
+    this.resolveInitialization(generation, 'ERROR');
     await this.closeFailedClient(client, generation);
-    await this.setStatus(WhatsAppConnectionStatus.ERROR, {
+    await this.transitionTo('ERROR', {
       lastError: this.isLockError(error)
         ? 'WhatsApp LocalAuth session is used by another process'
         : 'WhatsApp runtime failed',
     });
-    this.lifecycleState = 'IDLE';
   }
 
   private async waitForBrowserClosed(client: Client) {
@@ -868,8 +876,8 @@ export class WhatsAppClientService
     throw lastError;
   }
 
-  private setStatus(
-    status: WhatsAppConnectionStatus,
+  private async transitionTo(
+    state: WhatsAppRuntimeState,
     data: {
       phoneNumber?: string | null;
       displayName?: string | null;
@@ -879,14 +887,43 @@ export class WhatsAppClientService
       lastError?: string | null;
     } = {},
   ) {
-    const update = this.prisma.whatsAppSession.upsert({
-      where: { clientId: this.config.clientId },
-      create: { clientId: this.config.clientId, status, ...data },
-      update: { status, ...data },
+    const previousState = this.state;
+    this.state = state;
+    this.logger.log({
+      event: 'WHATSAPP_STATE_CHANGED',
+      generation: this.generation,
+      previousState,
+      nextState: state,
     });
-    return update.then(() => {
-      this.status = status;
-    });
+    await this.persistState(state, data);
+  }
+
+  private async persistState(
+    state: WhatsAppRuntimeState,
+    data: {
+      phoneNumber?: string | null;
+      displayName?: string | null;
+      lastConnectedAt?: Date;
+      lastDisconnectedAt?: Date;
+      lastQrAt?: Date;
+      lastError?: string | null;
+    } = {},
+  ) {
+    try {
+      await this.prisma.whatsAppSession.upsert({
+        where: { clientId: this.config.clientId },
+        create: { clientId: this.config.clientId, status: state, ...data },
+        update: { status: state, ...data },
+      });
+    } catch (error) {
+      this.logLifecycle(
+        'WHATSAPP_STATE_PERSISTENCE_FAILED',
+        this.generation,
+        'error',
+        error,
+        { nextState: state },
+      );
+    }
   }
 
   private enqueueLifecycleEvent(
@@ -894,22 +931,22 @@ export class WhatsAppClientService
     generation: number,
     operation: () => Promise<void>,
   ) {
-    const queued = this.lifecycleEventQueue.then(() =>
+    const queued = this.eventQueue.then(() =>
       this.safeEvent(client, generation, operation),
     );
-    this.lifecycleEventQueue = queued.catch(() => undefined);
+    this.eventQueue = queued.catch(() => undefined);
   }
 
   private waitForInitializationOutcome(generation: number) {
     return new Promise<InitializationOutcome>((resolve) => {
       const timeout = setTimeout(() => {
-        if (this.readyEventGeneration === generation) return;
-        if (this.initializationWaiter?.generation === generation) {
-          this.initializationWaiter = null;
+        if (this.state === 'CONNECTED') return;
+        if (this.operationCompletion?.generation === generation) {
+          this.operationCompletion = null;
         }
-        resolve('FAILED');
+        resolve('ERROR');
       }, this.config.initTimeoutMs);
-      this.initializationWaiter = {
+      this.operationCompletion = {
         generation,
         resolve: (outcome) => {
           clearTimeout(timeout);
@@ -923,16 +960,16 @@ export class WhatsAppClientService
     generation: number,
     outcome: InitializationOutcome,
   ) {
-    if (this.initializationWaiter?.generation !== generation) return;
-    const waiter = this.initializationWaiter;
-    this.initializationWaiter = null;
+    if (this.operationCompletion?.generation !== generation) return;
+    const waiter = this.operationCompletion;
+    this.operationCompletion = null;
     waiter.resolve(outcome);
   }
 
   private cancelInitialization() {
-    if (!this.initializationWaiter) return;
+    if (!this.operationCompletion) return;
     this.resolveInitialization(
-      this.initializationWaiter.generation,
+      this.operationCompletion.generation,
       'CANCELLED',
     );
   }
@@ -945,9 +982,15 @@ export class WhatsAppClientService
     if (
       this.client !== client ||
       this.generation !== generation ||
-      this.lifecycleState === 'DISCONNECTING' ||
-      this.lifecycleState === 'LOGGING_OUT'
+      this.state === 'DISCONNECTING' ||
+      this.state === 'LOGGING_OUT'
     ) {
+      this.logger.warn({
+        event: 'WHATSAPP_STALE_EVENT_IGNORED',
+        generation,
+        currentGeneration: this.generation,
+        state: this.state,
+      });
       return;
     }
     try {
@@ -965,7 +1008,7 @@ export class WhatsAppClientService
     try {
       await this.handleUnexpectedRuntimeFailure(client, generation, error);
     } catch (secondaryError) {
-      this.lifecycleState = 'FAILED';
+      this.state = 'ERROR';
       this.logLifecycle(
         'runtime_failure_handler_failed',
         generation,
@@ -975,23 +1018,34 @@ export class WhatsAppClientService
     }
   }
 
-  private trackLifecycle<T>(operation: Promise<T>) {
-    this.lifecyclePromise = operation;
-    const clearLifecycle = () => {
-      if (this.lifecyclePromise === operation) this.lifecyclePromise = null;
+  private trackOperation<T>(
+    kind: 'INITIALIZE' | 'RECONNECT' | 'DESTROY' | 'LOGOUT',
+    operation: Promise<T>,
+  ) {
+    this.currentOperation = { kind, promise: operation };
+    const clearOperation = () => {
+      if (this.currentOperation?.promise === operation) {
+        this.currentOperation = null;
+      }
     };
-    void operation.then(clearLifecycle, clearLifecycle);
+    void operation.then(clearOperation, clearOperation);
     return operation;
+  }
+
+  private operationConflict(operation: string): never {
+    throw new ConflictException(
+      `WhatsApp operation ${operation} conflicts with ${this.currentOperation?.kind ?? 'unknown'}`,
+    );
   }
 
   private assertLifecycleAvailable(operation: string) {
     if (
-      this.lifecycleState === 'INITIALIZING' ||
-      this.lifecycleState === 'DISCONNECTING' ||
-      this.lifecycleState === 'LOGGING_OUT'
+      this.state === 'STARTING' ||
+      this.state === 'DISCONNECTING' ||
+      this.state === 'LOGGING_OUT'
     ) {
       throw new ConflictException(
-        `Операция ${operation} недоступна: lifecycle=${this.lifecycleState}`,
+        `Операция ${operation} недоступна: lifecycle=${this.state}`,
       );
     }
   }
@@ -1029,12 +1083,12 @@ export class WhatsAppClientService
   }
 
   private ensureConnected() {
-    if (
-      !this.client ||
-      this.lifecycleState !== 'READY' ||
-      this.status !== WhatsAppConnectionStatus.CONNECTED
-    ) {
-      throw new ServiceUnavailableException('WhatsApp не подключён');
+    if (!this.client || this.state !== 'CONNECTED') {
+      throw new ServiceUnavailableException({
+        code: 'WHATSAPP_NOT_CONNECTED',
+        message: `WhatsApp outbound is unavailable while state=${this.state}`,
+        state: this.state,
+      });
     }
   }
 
@@ -1061,11 +1115,7 @@ export class WhatsAppClientService
         return;
       } catch {
         const existingPid = this.readRuntimeLockPid(lockPath);
-        if (
-          existingPid &&
-          existingPid !== process.pid &&
-          this.isPidAlive(existingPid)
-        ) {
+        if (existingPid && this.isPidAlive(existingPid)) {
           throw new ConflictException(
             `WhatsApp LocalAuth profile is owned by backend PID ${existingPid}`,
           );
@@ -1089,6 +1139,12 @@ export class WhatsAppClientService
       ) {
         unlinkSync(this.config.runtimeLockPath);
       }
+      this.logger.log({
+        event: 'WHATSAPP_RUNTIME_LOCK_RELEASED',
+        generation: this.generation,
+        pid: process.pid,
+        lockPath: this.config.runtimeLockPath,
+      });
     } catch (error) {
       this.logLifecycle(
         'runtime_lock_release_failed',
@@ -1159,7 +1215,7 @@ export class WhatsAppClientService
       event,
       clientInstanceId: `${this.config.clientId}:${generation}`,
       generation,
-      lifecycleState: this.lifecycleState,
+      state: this.state,
       ...metadata,
       ...(error instanceof Error
         ? { errorName: error.name, errorMessage: error.message }

@@ -97,7 +97,7 @@ describe('ConversationOrchestrator inbound replies', () => {
   };
   const whatsappClient: any = {
     getStatus: jest.fn(() =>
-      Promise.resolve({ connected: true, lifecycleState: 'READY' }),
+      Promise.resolve({ connected: true, state: 'CONNECTED' }),
     ),
   };
   const whatsapp: any = {
@@ -115,6 +115,7 @@ describe('ConversationOrchestrator inbound replies', () => {
     findTargetById: jest.fn(),
     updateTargetStatus: jest.fn(() => Promise.resolve({})),
     attachConversation: jest.fn(),
+    createConversationForTarget: jest.fn(),
   };
   const media: any = { onProcessed: jest.fn() };
   const telegram: any = {
@@ -326,6 +327,56 @@ describe('ConversationOrchestrator inbound replies', () => {
     expect(conversations.ensureStrategy).toHaveBeenCalledWith(
       input.conversationId,
       'BARBERSHOP_GENERAL',
+    );
+  });
+
+  it('sends Campaign B through a newly owned conversation for a previously contacted Contact', async () => {
+    const campaignBConversation = {
+      id: 'conversation-b',
+      contactId: input.contactId,
+      strategyCode: 'BARBERSHOP_GENERAL',
+    };
+    campaigns.findTargetById.mockResolvedValueOnce({
+      id: 'target-b',
+      campaignId: 'campaign-b',
+      contactId: input.contactId,
+      status: 'QUEUED',
+      strategyCode: 'BARBERSHOP_GENERAL',
+      campaign: { status: 'RUNNING' },
+      contact: {
+        id: input.contactId,
+        phone: '+77086810693',
+        deletedAt: null,
+        outreachEligible: true,
+        strategyCode: 'BARBERSHOP_GENERAL',
+      },
+      conversation: null,
+    });
+    campaigns.createConversationForTarget.mockResolvedValueOnce(
+      campaignBConversation,
+    );
+    messages.findLatestByRole.mockResolvedValueOnce(null);
+    ai.generateFirstMessage.mockResolvedValueOnce({
+      run: { id: 'run-b' },
+      message: { id: 'message-b', text: 'Campaign B message' },
+    });
+    whatsapp.sendAiMessage.mockResolvedValueOnce({
+      whatsappMessage: { id: 'wa-b' },
+      alreadySent: false,
+      outcomePending: false,
+    });
+
+    await service.startConversationForCampaignTarget('target-b');
+
+    expect(campaigns.createConversationForTarget).toHaveBeenCalledWith(
+      'target-b',
+      'BARBERSHOP_GENERAL',
+    );
+    expect(whatsapp.sendAiMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: 'conversation-b',
+        messageId: 'message-b',
+      }),
     );
   });
 

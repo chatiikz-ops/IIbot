@@ -698,7 +698,17 @@ export class WhatsAppMessagingService {
     strategyCode: string | null,
   ) {
     const existing = await tx.conversation.findFirst({
-      where: { contactId },
+      where: {
+        contactId,
+        status: {
+          notIn: [
+            ConversationStatus.QUALIFIED,
+            ConversationStatus.HANDOFF_REQUIRED,
+            ConversationStatus.REJECTED,
+            ConversationStatus.CLOSED,
+          ],
+        },
+      },
       orderBy: [{ lastMessageAt: 'desc' }, { startedAt: 'desc' }],
     });
     if (existing) return existing;

@@ -64,7 +64,7 @@ describe('Campaign restart and outbound idempotency (e2e)', () => {
           });
         },
         getStatus: () =>
-          Promise.resolve({ connected: true, status: 'CONNECTED' }),
+          Promise.resolve({ connected: true, state: 'CONNECTED' }),
       })
       .overrideProvider(TelegramNotificationsService)
       .useValue({
