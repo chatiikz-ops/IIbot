@@ -1,3 +1,5 @@
+/// <reference types="jest" />
+
 import { BadGatewayException, RequestTimeoutException } from '@nestjs/common';
 
 const AutomationJobStatus = {
@@ -24,6 +26,8 @@ jest.mock('../generated/prisma/client', () => ({
     WAITING: 'WAITING',
     READY: 'READY',
     QUEUED: 'QUEUED',
+    PROCESSING: 'PROCESSING',
+    ERROR: 'ERROR',
   },
   Prisma: {},
 }));
@@ -61,15 +65,59 @@ describe('AutomationWorkerService failure boundary', () => {
       update: jest.fn().mockResolvedValue({}),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     };
+
+    const campaignTarget = {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    };
+
     const orchestrator = {
       processIncomingClientMessage: jest.fn().mockResolvedValue(undefined),
     };
+
     const worker = new AutomationWorkerService(
-      { automationJob } as unknown as PrismaService,
+      {
+        automationJob,
+        campaignTarget,
+      } as unknown as PrismaService,
       orchestrator as unknown as ConversationOrchestratorService,
     ) as unknown as WorkerInternals;
-    return { worker, automationJob, orchestrator };
+
+    return {
+      worker,
+      automationJob,
+      campaignTarget,
+      orchestrator,
+    };
   };
+
+  it('requeues a pacing-deferred campaign job without marking it failed', async () => {
+    const { worker, automationJob, campaignTarget } = createWorker();
+    const deferredUntil = new Date(Date.now() + 45_000);
+    jest.spyOn(worker, 'runCampaignTarget').mockResolvedValue(deferredUntil);
+    worker.active = 1;
+
+    await worker.executeWithinBoundary({
+      id: 'deferred-job',
+      type: AutomationJobType.CAMPAIGN_TARGET,
+      attempts: 1,
+      maxAttempts: 3,
+      campaignTargetId: 'target-1',
+      payload: null,
+    });
+
+    expect(automationJob.update).toHaveBeenCalledWith({
+      where: { id: 'deferred-job' },
+      // Jest asymmetric matchers are intentionally typed as any.
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      data: expect.objectContaining({
+        status: AutomationJobStatus.PENDING,
+        runAt: deferredUntil,
+        attempts: { decrement: 1 },
+        lastError: null,
+      }),
+    });
+    expect(campaignTarget.updateMany).not.toHaveBeenCalled();
+  });
 
   it('contains an exhausted OpenAI timeout and can process the next campaign job', async () => {
     const { worker, automationJob } = createWorker();

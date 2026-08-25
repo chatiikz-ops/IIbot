@@ -49,10 +49,17 @@ export class AutomationWorkerService
     30,
     Number(process.env.AUTOMATION_JOB_STALE_LOCK_SECONDS || 300),
   );
-  private readonly campaignConcurrency = Math.min(
-    15,
-    Math.max(1, Number(process.env.CAMPAIGN_WORKER_CONCURRENCY || 10)),
+  // Cold campaign outreach is intentionally serialized:
+  // only one first-message job may execute at a time.
+  private readonly campaignConcurrency = 1;
+
+  // Minimum interval between first outbound campaign messages.
+  // Inbound replies use a separate pool and are NOT throttled by this value.
+  private readonly firstCampaignMessageIntervalMs = Math.max(
+    45_000,
+    Number(process.env.CAMPAIGN_FIRST_MESSAGE_INTERVAL_SECONDS || 45) * 1000,
   );
+
   private readonly inboundConcurrency = Math.min(
     50,
     Math.max(1, Number(process.env.INBOUND_WORKER_CONCURRENCY || 20)),
@@ -443,43 +450,128 @@ export class AutomationWorkerService
       async (tx) => {
         const target = await tx.campaignTarget.findUnique({
           where: { id: targetId },
-          include: { campaign: { include: { settings: true } } },
+          include: {
+            campaign: {
+              include: {
+                settings: true,
+              },
+            },
+          },
         });
+
         if (!target?.campaign.settings) {
           return null;
         }
+
         if (target.campaign.status === CampaignStatus.PAUSED) {
           return new Date(Date.now() + this.pollMs);
         }
-        if (target.campaign.status !== CampaignStatus.RUNNING) return null;
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`campaign-quota:${target.campaignId}`}))`;
+
+        if (target.campaign.status !== CampaignStatus.RUNNING) {
+          return null;
+        }
+
+        // Global lock for cold campaign pacing.
+        // Conversation replies do not enter this code path.
+        await tx.$executeRaw`
+          SELECT pg_advisory_xact_lock(
+            hashtext('global-campaign-first-message')
+          )
+        `;
+
+        // campaignConcurrency is process-local. Across PM2 instances the
+        // oldest non-stale PROCESSING job is the single distributed leader.
+        // Other jobs are deferred without consuming an attempt. The leader
+        // performs network I/O outside this transaction; once it completes,
+        // messageSentAt becomes the durable cooldown source of truth.
+        if (jobId) {
+          const leader = await tx.automationJob.findFirst({
+            where: {
+              type: AutomationJobType.CAMPAIGN_TARGET,
+              status: AutomationJobStatus.PROCESSING,
+              lockedAt: {
+                gte: new Date(Date.now() - this.staleLockSeconds * 1000),
+              },
+            },
+            orderBy: [{ lockedAt: 'asc' }, { id: 'asc' }],
+            select: { id: true },
+          });
+          if (leader && leader.id !== jobId) {
+            return new Date(Date.now() + this.pollMs);
+          }
+        }
+
         const settings = target.campaign.settings;
+
         const window = campaignWindow(
           new Date(),
           settings.workingHoursStart,
           settings.workingHoursEnd,
           settings.timezone,
         );
-        if (!window.withinWindow) return window.nextRunAt;
+
+        if (!window.withinWindow) {
+          return window.nextRunAt;
+        }
+
         const sentToday = await tx.campaignTarget.count({
           where: {
             campaignId: target.campaignId,
-            messageSentAt: { gte: window.dayStart, lt: window.dayEnd },
+            messageSentAt: {
+              gte: window.dayStart,
+              lt: window.dayEnd,
+            },
           },
         });
+
         if (sentToday >= settings.dailyMessageLimit) {
           return window.nextDayStart;
         }
+
+        // Enforce at least 45 seconds between successful first
+        // campaign messages across ALL campaigns on this WhatsApp account.
+        const lastSentTarget = await tx.campaignTarget.findFirst({
+          where: {
+            messageSentAt: {
+              not: null,
+            },
+          },
+          orderBy: {
+            messageSentAt: 'desc',
+          },
+          select: {
+            messageSentAt: true,
+          },
+        });
+
+        if (lastSentTarget?.messageSentAt) {
+          const allowedAt = new Date(
+            lastSentTarget.messageSentAt.getTime() +
+              this.firstCampaignMessageIntervalMs,
+          );
+
+          if (allowedAt.getTime() > Date.now()) {
+            return allowedAt;
+          }
+        }
+
         return null;
       },
-      { timeout: 10_000 },
+      {
+        timeout: 10_000,
+      },
     );
-    if (deferredUntil) return deferredUntil;
+
+    if (deferredUntil) {
+      return deferredUntil;
+    }
+
     await this.orchestrator.startConversationForCampaignTarget(
       targetId,
       process.env.OPENAI_MOCK_MODE === 'true' ? 'QUALIFIED' : undefined,
       jobId,
     );
+
     return null;
   }
 
@@ -495,44 +587,22 @@ export class AutomationWorkerService
       orderBy: { createdAt: 'asc' },
       take: 50,
     });
-    for (const [index, target] of targets.entries()) {
-      
-      const runAt = new Date(
-  Date.now() + (index % this.campaignConcurrency) * 100,
-);
-
-await this.prisma.automationJob.upsert({
-  where: {
-    deduplicationKey: `campaign-target:${target.id}`,
-  },
-
-  create: {
-    type: AutomationJobType.CAMPAIGN_TARGET,
-    status: AutomationJobStatus.PENDING,
-    runAt,
-
-    contactId: target.contactId,
-    campaignId: target.campaignId,
-    campaignTargetId: target.id,
-
-    deduplicationKey: `campaign-target:${target.id}`,
-  },
-
-  update: {
-    status: AutomationJobStatus.PENDING,
-    runAt,
-
-    attempts: 0,
-
-    lockedAt: null,
-    lockedBy: null,
-
-    lastError: null,
-    errorCode: null,
-
-    completedAt: null,
-  },
-});
+    for (const target of targets) {
+      const runAt = new Date();
+      await this.prisma.automationJob.upsert({
+        where: { deduplicationKey: `campaign-target:${target.id}` },
+        create: {
+          type: AutomationJobType.CAMPAIGN_TARGET,
+          status: AutomationJobStatus.PENDING,
+          runAt,
+          contactId: target.contactId,
+          campaignId: target.campaignId,
+          campaignTargetId: target.id,
+          deduplicationKey: `campaign-target:${target.id}`,
+        },
+        // Never reset a job another worker may already have claimed.
+        update: {},
+      });
       await this.prisma.campaignTarget.updateMany({
         where: {
           id: target.id,

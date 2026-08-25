@@ -19,7 +19,10 @@ class FakeClient extends EventEmitter {
       },
     ]),
   );
-  pupBrowser = { isConnected: () => false };
+  pupBrowser = {
+    isConnected: jest.fn(() => false),
+    close: jest.fn(() => Promise.resolve()),
+  };
   info = { wid: { user: '77001234567' }, pushname: 'Test' };
 }
 
@@ -238,6 +241,68 @@ describe('WhatsAppClientService lifecycle', () => {
     await Promise.all([initialization, destruction]);
     expect(clients[0].destroy).toHaveBeenCalledTimes(1);
     expect((service as unknown as Internals).lifecycleState).toBe('IDLE');
+  });
+
+  it('completes normal destroy quickly and persists DISCONNECTED', async () => {
+    const initialization = service.initialize();
+    await ready();
+    await initialization;
+    const startedAt = Date.now();
+    await service.destroy();
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+    expect(session.status).toBe(WhatsAppConnectionStatus.DISCONNECTED);
+    expect(clients[0].logout).not.toHaveBeenCalled();
+  });
+
+  it('bounds a client.destroy call that never settles', async () => {
+    const initialization = service.initialize();
+    await ready();
+    await initialization;
+    clients[0].destroy.mockImplementation(
+      () => new Promise<void>(() => undefined),
+    );
+    jest.useFakeTimers();
+    const destruction = service.destroy();
+    await jest.advanceTimersByTimeAsync(4001);
+    await destruction;
+    jest.useRealTimers();
+    expect(session.status).toBe(WhatsAppConnectionStatus.DISCONNECTED);
+    expect((service as unknown as Internals).lifecycleState).toBe('IDLE');
+  });
+
+  it('bounds forced Chromium close and remains idempotent', async () => {
+    const initialization = service.initialize();
+    await ready();
+    await initialization;
+    clients[0].pupBrowser.isConnected.mockReturnValue(true);
+    clients[0].pupBrowser.close.mockImplementation(
+      () => new Promise<void>(() => undefined),
+    );
+    jest.useFakeTimers();
+    const destruction = service.destroy();
+    await jest.advanceTimersByTimeAsync(2501);
+    await destruction;
+    await service.destroy();
+    jest.useRealTimers();
+    expect(session.status).toBe(WhatsAppConnectionStatus.DISCONNECTED);
+    expect(clients[0].destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconnects with preserved LocalAuth after destroy', async () => {
+    const initialization = service.initialize();
+    await ready();
+    await initialization;
+    await service.destroy();
+    const reconnect = service.reconnect();
+    await tick();
+    expect(clients).toHaveLength(2);
+    await ready(clients[1]);
+    await reconnect;
+    await expect(service.getStatus()).resolves.toMatchObject({
+      connected: true,
+      lifecycleState: 'READY',
+    });
+    expect(clients[0].logout).not.toHaveBeenCalled();
   });
 
   it('clean shutdown closes Chromium without logging out or deleting LocalAuth', async () => {

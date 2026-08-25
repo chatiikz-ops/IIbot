@@ -28,7 +28,7 @@ type LifecycleState =
   | 'READY'
   | 'DISCONNECTED'
   | 'FAILED'
-  | 'DESTROYING'
+  | 'DISCONNECTING'
   | 'LOGGING_OUT';
 type InitializationOutcome = 'READY' | 'FAILED' | 'CANCELLED';
 
@@ -163,6 +163,8 @@ export class WhatsAppClientService
     if (this.initializationPromise) return this.initializationPromise;
     this.assertLifecycleAvailable('initialize');
     if (this.client) return this.getStatus();
+    if (!this.ownsRuntimeLock && this.config.runtimeLockPath)
+      this.acquireRuntimeLock();
 
     const operation = this.performInitialize();
     this.initializationPromise = operation;
@@ -190,7 +192,7 @@ export class WhatsAppClientService
   }
 
   async destroy() {
-    if (this.lifecycleState === 'DESTROYING' && this.lifecyclePromise) {
+    if (this.lifecycleState === 'DISCONNECTING' && this.lifecyclePromise) {
       await this.lifecyclePromise;
       return this.getStatus();
     }
@@ -419,8 +421,10 @@ export class WhatsAppClientService
     if (this.initializationPromise) {
       await this.initializationPromise.catch(() => undefined);
     }
-    this.lifecycleState = 'DESTROYING';
+    this.lifecycleState = 'DISCONNECTING';
     if (this.client) await this.closeCurrentClient();
+    if (!this.ownsRuntimeLock && this.config.runtimeLockPath)
+      this.acquireRuntimeLock();
     this.lifecycleState = 'INITIALIZING';
     await this.setStatus(WhatsAppConnectionStatus.INITIALIZING);
     try {
@@ -432,11 +436,26 @@ export class WhatsAppClientService
   }
 
   private async performDestroy(updateStatus: boolean) {
+    const startedAt = Date.now();
+    this.lifecycleState = 'DISCONNECTING';
+    this.logLifecycle(
+      'WHATSAPP_DISCONNECT_STARTED',
+      this.generation,
+      'log',
+      undefined,
+      { stage: 'disconnect', durationMs: 0 },
+    );
     this.cancelInitialization();
     if (this.initializationPromise) {
-      await this.initializationPromise.catch(() => undefined);
+      try {
+        await this.withTimeout(
+          this.initializationPromise.catch(() => undefined),
+          5000,
+        );
+      } catch {
+        // Cancellation is best-effort; runtime cleanup below is bounded too.
+      }
     }
-    this.lifecycleState = 'DESTROYING';
     try {
       if (this.client) await this.closeCurrentClient();
       this.clearQr();
@@ -447,6 +466,21 @@ export class WhatsAppClientService
       }
     } finally {
       this.lifecycleState = this.client ? 'READY' : 'IDLE';
+      this.releaseRuntimeLock();
+      this.logLifecycle(
+        'WHATSAPP_RUNTIME_LOCK_RELEASED',
+        this.generation,
+        'log',
+        undefined,
+        { stage: 'runtime_lock', durationMs: Date.now() - startedAt },
+      );
+      this.logLifecycle(
+        'WHATSAPP_DISCONNECT_COMPLETED',
+        this.generation,
+        'log',
+        undefined,
+        { stage: 'disconnect', durationMs: Date.now() - startedAt },
+      );
     }
   }
 
@@ -471,15 +505,15 @@ export class WhatsAppClientService
     client.removeAllListeners('disconnected');
     try {
       try {
-        await client.logout();
+        await this.withTimeout(client.logout(), 5000);
         remoteLogoutCompleted = true;
       } catch (error) {
         logoutError = error;
       }
 
       try {
-        await client.destroy();
-        await this.waitForBrowserClosed(client);
+        await this.withTimeout(client.destroy(), 4000);
+        await this.forceCloseBrowser(client, this.generation);
         runtimeDestroyCompleted = true;
       } catch (error) {
         destroyError = error;
@@ -537,12 +571,73 @@ export class WhatsAppClientService
   private async closeCurrentClient() {
     const client = this.client;
     if (!client) return;
+    const generation = this.generation;
+    const startedAt = Date.now();
     client.removeAllListeners();
-    await client.destroy();
-    await this.waitForBrowserClosed(client);
+    this.logLifecycle(
+      'WHATSAPP_CLIENT_DESTROY_STARTED',
+      generation,
+      'log',
+      undefined,
+      { stage: 'client.destroy', durationMs: 0 },
+    );
+    try {
+      await this.withTimeout(client.destroy(), 4000);
+    } catch (error) {
+      this.logLifecycle(
+        'WHATSAPP_CLIENT_DESTROY_TIMEOUT',
+        generation,
+        'warn',
+        error,
+        { stage: 'client.destroy', durationMs: Date.now() - startedAt },
+      );
+    }
+    await this.forceCloseBrowser(client, generation);
     if (this.client === client) {
       this.client = null;
       this.authStrategy = null;
+    }
+    this.logLifecycle(
+      'WHATSAPP_CLIENT_DESTROY_COMPLETED',
+      generation,
+      'log',
+      undefined,
+      { stage: 'client.destroy', durationMs: Date.now() - startedAt },
+    );
+  }
+
+  private async forceCloseBrowser(client: Client, generation: number) {
+    const startedAt = Date.now();
+    this.logLifecycle(
+      'WHATSAPP_BROWSER_CLOSE_STARTED',
+      generation,
+      'log',
+      undefined,
+      { stage: 'browser.close', durationMs: 0 },
+    );
+    try {
+      if (client.pupPage && !client.pupPage.isClosed()) {
+        await this.withTimeout(client.pupPage.close(), 1500);
+      }
+      if (client.pupBrowser?.isConnected()) {
+        await this.withTimeout(client.pupBrowser.close(), 2500);
+      }
+      await this.waitForBrowserClosed(client);
+      this.logLifecycle(
+        'WHATSAPP_BROWSER_CLOSE_COMPLETED',
+        generation,
+        'log',
+        undefined,
+        { stage: 'browser.close', durationMs: Date.now() - startedAt },
+      );
+    } catch (error) {
+      this.logLifecycle(
+        'WHATSAPP_BROWSER_CLOSE_TIMEOUT',
+        generation,
+        'warn',
+        error,
+        { stage: 'browser.close', durationMs: Date.now() - startedAt },
+      );
     }
   }
 
@@ -589,7 +684,7 @@ export class WhatsAppClientService
     }
     const client = this.client;
     if (!client) return;
-    this.lifecycleState = 'DESTROYING';
+    this.lifecycleState = 'DISCONNECTING';
     await this.closeFailedClient(client);
     this.lifecycleState = 'IDLE';
   }
@@ -732,12 +827,12 @@ export class WhatsAppClientService
   ) {
     if (
       this.client !== client ||
-      this.lifecycleState === 'DESTROYING' ||
+      this.lifecycleState === 'DISCONNECTING' ||
       this.lifecycleState === 'LOGGING_OUT'
     ) {
       return;
     }
-    this.lifecycleState = 'DESTROYING';
+    this.lifecycleState = 'DISCONNECTING';
     this.resolveInitialization(generation, 'FAILED');
     await this.closeFailedClient(client, generation);
     await this.setStatus(WhatsAppConnectionStatus.ERROR, {
@@ -850,7 +945,7 @@ export class WhatsAppClientService
     if (
       this.client !== client ||
       this.generation !== generation ||
-      this.lifecycleState === 'DESTROYING' ||
+      this.lifecycleState === 'DISCONNECTING' ||
       this.lifecycleState === 'LOGGING_OUT'
     ) {
       return;
@@ -892,7 +987,7 @@ export class WhatsAppClientService
   private assertLifecycleAvailable(operation: string) {
     if (
       this.lifecycleState === 'INITIALIZING' ||
-      this.lifecycleState === 'DESTROYING' ||
+      this.lifecycleState === 'DISCONNECTING' ||
       this.lifecycleState === 'LOGGING_OUT'
     ) {
       throw new ConflictException(
@@ -1025,15 +1120,24 @@ export class WhatsAppClientService
   }
 
   private withTimeout<T>(operation: Promise<T>, timeoutMs: number) {
-    return Promise.race([
-      operation,
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error(`Operation timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        ),
-      ),
-    ]);
+    return new Promise<T>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error(`Operation timed out after ${timeoutMs}ms`)),
+        timeoutMs,
+      );
+      void operation.then(
+        (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        (error: unknown) => {
+          clearTimeout(timeout);
+          reject(
+            error instanceof Error ? error : new Error('Operation failed'),
+          );
+        },
+      );
+    });
   }
 
   private createClient(authStrategy: LocalAuth) {

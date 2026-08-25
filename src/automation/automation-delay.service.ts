@@ -25,7 +25,8 @@ export class AutomationDelayService {
         },
         orderBy: { createdAt: 'desc' },
       });
-      const requestedAt = now.getTime() + Math.max(delaySeconds * 1000, windowMs);
+      const requestedAt =
+        now.getTime() + Math.max(delaySeconds * 1000, windowMs);
       if (pending) {
         const deadline = pending.createdAt.getTime() + maxMs;
         await tx.automationJob.update({

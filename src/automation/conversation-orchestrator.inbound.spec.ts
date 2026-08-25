@@ -1,3 +1,6 @@
+/// <reference types="jest" />
+/* eslint-disable @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument */
+
 import { BadGatewayException } from '@nestjs/common';
 import { ConversationOrchestratorService } from './conversation-orchestrator.service';
 
@@ -23,12 +26,12 @@ describe('ConversationOrchestrator inbound replies', () => {
     workingHoursEnd: null,
     timezone: 'Asia/Almaty',
   };
-  const settings = { get: jest.fn(() => Promise.resolve(baseSettings)) };
-  const events = { create: jest.fn(() => Promise.resolve({})) };
-  const delay = {
+  const settings: any = { get: jest.fn(() => Promise.resolve(baseSettings)) };
+  const events: any = { create: jest.fn(() => Promise.resolve({})) };
+  const delay: any = {
     scheduleConversation: jest.fn(() => Promise.resolve(true)),
   };
-  const contacts = {
+  const contacts: any = {
     findOne: jest.fn(() =>
       Promise.resolve({
         id: input.contactId,
@@ -39,7 +42,7 @@ describe('ConversationOrchestrator inbound replies', () => {
       }),
     ),
   };
-  const conversations = {
+  const conversations: any = {
     findOne: jest.fn(() =>
       Promise.resolve({
         id: input.conversationId,
@@ -52,7 +55,7 @@ describe('ConversationOrchestrator inbound replies', () => {
     ensureStrategy: jest.fn(),
     updateStatus: jest.fn(),
   };
-  const messages = {
+  const messages: any = {
     findOne: jest.fn(() =>
       Promise.resolve({
         id: input.messageId,
@@ -60,16 +63,28 @@ describe('ConversationOrchestrator inbound replies', () => {
         role: 'CLIENT',
       }),
     ),
+    findUnprocessedClients: jest.fn(() =>
+      Promise.resolve([
+        {
+          id: input.messageId,
+          conversationId: input.conversationId,
+          role: 'CLIENT',
+          text: 'Сообщение клиента',
+          aiRunId: null,
+          createdAt: new Date('2026-08-13T13:00:00Z'),
+        },
+      ]),
+    ),
     countByRole: jest.fn(() => Promise.resolve(1)),
     findLatestByRole: jest.fn(),
     findAiReply: jest.fn(),
   };
-  const prompts = {
+  const prompts: any = {
     getActivePromptByCode: jest.fn(() =>
       Promise.resolve({ version: { maxAssistantMessages: 5 } }),
     ),
   };
-  const ai = {
+  const ai: any = {
     hasProcessedMessage: jest.fn(() => Promise.resolve(false)),
     processClientMessage: jest.fn(() =>
       Promise.resolve({
@@ -80,12 +95,12 @@ describe('ConversationOrchestrator inbound replies', () => {
     ),
     generateFirstMessage: jest.fn(),
   };
-  const whatsappClient = {
+  const whatsappClient: any = {
     getStatus: jest.fn(() =>
       Promise.resolve({ connected: true, lifecycleState: 'READY' }),
     ),
   };
-  const whatsapp = {
+  const whatsapp: any = {
     onKnownInbound: jest.fn(),
     sendAiMessage: jest.fn(() =>
       Promise.resolve({
@@ -94,15 +109,15 @@ describe('ConversationOrchestrator inbound replies', () => {
       }),
     ),
   };
-  const campaigns = {
+  const campaigns: any = {
     markTargetReplied: jest.fn(() => Promise.resolve(null)),
     findTargetByConversationId: jest.fn(() => Promise.resolve(null)),
     findTargetById: jest.fn(),
     updateTargetStatus: jest.fn(() => Promise.resolve({})),
     attachConversation: jest.fn(),
   };
-  const media = { onProcessed: jest.fn() };
-  const telegram = {
+  const media: any = { onProcessed: jest.fn() };
+  const telegram: any = {
     notifyLeadOutcome: jest.fn(),
     notifyAiFailed: jest.fn(),
     notifyWhatsAppFailed: jest.fn(),
@@ -136,6 +151,16 @@ describe('ConversationOrchestrator inbound replies', () => {
     ai.hasProcessedMessage.mockResolvedValue(false);
     messages.findLatestByRole.mockResolvedValue(null);
     messages.findAiReply.mockResolvedValue(null);
+    messages.findUnprocessedClients.mockResolvedValue([
+      {
+        id: input.messageId,
+        conversationId: input.conversationId,
+        role: 'CLIENT',
+        text: 'Сообщение клиента',
+        aiRunId: null,
+        createdAt: new Date('2026-08-13T13:00:00Z'),
+      },
+    ]);
     whatsapp.sendAiMessage.mockResolvedValue({
       whatsappMessage: { id: 'wa-outbound-2' },
       alreadySent: false,
@@ -311,6 +336,7 @@ describe('ConversationOrchestrator inbound replies', () => {
       input.conversationId,
       input.messageId,
       undefined,
+      [input.messageId],
     );
     expect(ai.generateFirstMessage).not.toHaveBeenCalled();
     expect(whatsapp.sendAiMessage).toHaveBeenCalledWith(

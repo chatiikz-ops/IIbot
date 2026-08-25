@@ -263,9 +263,10 @@ export class AiService {
         },
         data: { aiRunId: run.id },
       });
-      if (claimed.count !== messageIds.length) {
-        throw new ConflictException('One or more messages were already processed');
-      }
+      if (claimed.count !== messageIds.length)
+        throw new ConflictException(
+          'One or more messages were already processed',
+        );
       return run;
     });
   }

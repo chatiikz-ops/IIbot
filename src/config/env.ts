@@ -28,6 +28,12 @@ const schema = z
       .min(1)
       .max(15)
       .default(10),
+    CAMPAIGN_FIRST_MESSAGE_INTERVAL_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(45)
+      .max(3600)
+      .default(45),
     INBOUND_WORKER_CONCURRENCY: z.coerce
       .number()
       .int()
@@ -81,13 +87,12 @@ const schema = z
         message: 'must be true in production',
       });
     }
-    if (
-      env.INBOUND_AGGREGATION_MAX_MS < env.INBOUND_AGGREGATION_WINDOW_MS
-    ) {
+    if (env.INBOUND_AGGREGATION_MAX_MS < env.INBOUND_AGGREGATION_WINDOW_MS) {
       ctx.addIssue({
         code: 'custom',
         path: ['INBOUND_AGGREGATION_MAX_MS'],
-        message: 'must be greater than or equal to INBOUND_AGGREGATION_WINDOW_MS',
+        message:
+          'must be greater than or equal to INBOUND_AGGREGATION_WINDOW_MS',
       });
     }
   });
