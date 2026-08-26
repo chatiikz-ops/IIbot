@@ -56,8 +56,8 @@ export class AutomationWorkerService
   // Minimum interval between first outbound campaign messages.
   // Inbound replies use a separate pool and are NOT throttled by this value.
   private readonly firstCampaignMessageIntervalMs = Math.max(
-    45_000,
-    Number(process.env.CAMPAIGN_FIRST_MESSAGE_INTERVAL_SECONDS || 45) * 1000,
+    300_000,
+    Number(process.env.CAMPAIGN_FIRST_MESSAGE_INTERVAL_SECONDS || 300) * 1000,
   );
 
   private readonly inboundConcurrency = Math.min(
@@ -528,7 +528,7 @@ export class AutomationWorkerService
           return window.nextDayStart;
         }
 
-        // Enforce at least 45 seconds between successful first
+        // Enforce at least 300 seconds between successful first
         // campaign messages across ALL campaigns on this WhatsApp account.
         const lastSentTarget = await tx.campaignTarget.findFirst({
           where: {

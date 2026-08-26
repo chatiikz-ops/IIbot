@@ -36,7 +36,7 @@ describe('Campaign first-message pacing', () => {
 
     process.env = {
       ...ORIGINAL_ENV,
-      CAMPAIGN_FIRST_MESSAGE_INTERVAL_SECONDS: '45',
+      CAMPAIGN_FIRST_MESSAGE_INTERVAL_SECONDS: '300',
       INBOUND_WORKER_CONCURRENCY: '20',
       AUTOMATION_WORKER_POLL_MS: '1000',
       OPENAI_MOCK_MODE: 'false',
@@ -131,7 +131,7 @@ describe('Campaign first-message pacing', () => {
 
     expect(worker.campaignConcurrency).toBe(1);
     expect(worker.inboundConcurrency).toBe(20);
-    expect(worker.firstCampaignMessageIntervalMs).toBe(45_000);
+    expect(worker.firstCampaignMessageIntervalMs).toBe(300_000);
 
     console.log('');
     console.log('WORKER CONFIG');
@@ -144,7 +144,7 @@ describe('Campaign first-message pacing', () => {
     );
   });
 
-  it('does not allow another first campaign message before 45 seconds', async () => {
+  it('does not allow another first campaign message before 300 seconds', async () => {
     const { worker, orchestrator, setLastSentAt } = createHarness();
 
     setLastSentAt(new Date(Date.now() - 10_000));
@@ -154,19 +154,19 @@ describe('Campaign first-message pacing', () => {
     expect(
       orchestrator.startConversationForCampaignTarget,
     ).not.toHaveBeenCalled();
-    expect(deferredUntil).toEqual(new Date(Date.now() + 35_000));
+    expect(deferredUntil).toEqual(new Date(Date.now() + 290_000));
 
     console.log('');
     console.log('EARLY SEND TEST');
     console.log('Last cold send : 10 sec ago');
-    console.log('Next allowed   : in 35 sec');
+    console.log('Next allowed   : in 290 sec');
     console.log('RESULT         : PASS');
   });
 
-  it('allows the next first campaign message at 45 seconds', async () => {
+  it('allows the next first campaign message at 300 seconds', async () => {
     const { worker, orchestrator, setLastSentAt } = createHarness();
 
-    setLastSentAt(new Date(Date.now() - 45_000));
+    setLastSentAt(new Date(Date.now() - 300_000));
 
     const deferredUntil = await worker.runCampaignTarget('target-1', 'job-1');
 
@@ -176,13 +176,29 @@ describe('Campaign first-message pacing', () => {
     ).toHaveBeenCalledTimes(1);
 
     console.log('');
-    console.log('45 SECOND BOUNDARY TEST');
-    console.log('Last cold send : 45 sec ago');
+    console.log('300 SECOND BOUNDARY TEST');
+    console.log('Last cold send : 300 sec ago');
     console.log('New cold send  : allowed immediately');
     console.log('RESULT         : PASS');
   });
 
-  it('simulates 10 cold contacts and proves every gap is at least 45 seconds', async () => {
+  it('spaces two cold contacts by at least 300 seconds', async () => {
+    const { worker, sentAt } = createHarness();
+    for (const id of ['target-1', 'target-2']) {
+      for (;;) {
+        const deferred = await worker.runCampaignTarget(id, `job-${id}`);
+        if (!deferred) break;
+        jest.setSystemTime(deferred);
+      }
+    }
+
+    expect(sentAt).toHaveLength(2);
+    expect(sentAt[1].getTime() - sentAt[0].getTime()).toBeGreaterThanOrEqual(
+      300_000,
+    );
+  });
+
+  it('simulates 10 cold contacts and proves every gap is at least 300 seconds', async () => {
     const { worker, sentAt } = createHarness();
 
     const targetIds = Array.from(
@@ -211,7 +227,7 @@ describe('Campaign first-message pacing', () => {
       return (time.getTime() - sentAt[index].getTime()) / 1000;
     });
 
-    expect(gapsSeconds.every((gap) => gap >= 45)).toBe(true);
+    expect(gapsSeconds.every((gap) => gap >= 300)).toBe(true);
 
     const elapsedSeconds =
       (sentAt.at(-1)!.getTime() - sentAt[0].getTime()) / 1000;
@@ -235,15 +251,15 @@ describe('Campaign first-message pacing', () => {
     console.log('10 contacts elapsed:', elapsedSeconds, 'seconds');
     console.log(
       'Theoretical cold rate:',
-      (60 / 45).toFixed(2),
+      (60 / 300).toFixed(2),
       'messages/minute',
     );
-    console.log('VIOLATIONS:', gapsSeconds.filter((g) => g < 45).length);
+    console.log('VIOLATIONS:', gapsSeconds.filter((g) => g < 300).length);
     console.log('RESULT: PASS');
     console.log('==========================================');
   });
 
-  it('produces T+0, T+45 and T+90 for the first three successful sends', async () => {
+  it('produces T+0, T+300 and T+600 for the first three successful sends', async () => {
     const { worker, sentAt } = createHarness();
     for (const id of ['target-1', 'target-2', 'target-3']) {
       for (;;) {
@@ -253,7 +269,7 @@ describe('Campaign first-message pacing', () => {
       }
     }
     expect(sentAt.map((date) => date.getTime() - sentAt[0].getTime())).toEqual([
-      0, 45_000, 90_000,
+      0, 300_000, 600_000,
     ]);
   });
 
@@ -264,7 +280,7 @@ describe('Campaign first-message pacing', () => {
     restarted.setLastSentAt(first.getLastSentAt());
     await expect(
       restarted.worker.runCampaignTarget('target-2', 'job-2'),
-    ).resolves.toEqual(new Date(Date.now() + 45_000));
+    ).resolves.toEqual(new Date(Date.now() + 300_000));
     expect(
       restarted.orchestrator.startConversationForCampaignTarget,
     ).not.toHaveBeenCalled();
@@ -284,7 +300,7 @@ describe('Campaign first-message pacing', () => {
     ).toHaveBeenCalledTimes(1);
   });
 
-  it('conversation replies are not governed by the 45-second cold-send timer', async () => {
+  it('conversation replies are not governed by the 300-second cold-send timer', async () => {
     const { worker, orchestrator, setLastSentAt } = createHarness();
 
     // Pretend a cold campaign message was sent right now.
@@ -296,7 +312,7 @@ describe('Campaign first-message pacing', () => {
       'job-cold',
     );
 
-    expect(coldDeferred).toEqual(new Date(Date.now() + 45_000));
+    expect(coldDeferred).toEqual(new Date(Date.now() + 300_000));
 
     // Inbound reply uses its own orchestrator path and has no pacing wait.
     const inboundStartedAt = Date.now();
@@ -316,7 +332,7 @@ describe('Campaign first-message pacing', () => {
 
     console.log('');
     console.log('INBOUND INDEPENDENCE TEST');
-    console.log('Cold campaign next send : +45 sec');
+    console.log('Cold campaign next send : +300 sec');
     console.log('Client reply processing : immediate');
     console.log('RESULT                  : PASS');
   });

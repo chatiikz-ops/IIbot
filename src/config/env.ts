@@ -31,9 +31,9 @@ const schema = z
     CAMPAIGN_FIRST_MESSAGE_INTERVAL_SECONDS: z.coerce
       .number()
       .int()
-      .min(45)
+      .min(300)
       .max(3600)
-      .default(45),
+      .default(300),
     INBOUND_WORKER_CONCURRENCY: z.coerce
       .number()
       .int()
