@@ -9,6 +9,7 @@ import { WhatsAppConnectionStatus } from '../generated/prisma/enums';
 import { WhatsAppClientService } from './whatsapp-client.service';
 
 class FakeClient extends EventEmitter {
+  private readonly mainFrameToken = {};
   initialize = jest.fn<Promise<void>, []>();
   private pageClosed = false;
   destroy = jest.fn(() => {
@@ -18,6 +19,7 @@ class FakeClient extends EventEmitter {
   });
   logout = jest.fn(() => Promise.resolve(undefined));
   isRegisteredUser = jest.fn(() => Promise.resolve(true));
+  getState = jest.fn(() => Promise.resolve('CONNECTED'));
   sendMessage = jest.fn(() => Promise.resolve({ id: 'sent' }));
   getContactLidAndPhone = jest.fn(() =>
     Promise.resolve([
@@ -42,7 +44,9 @@ class FakeClient extends EventEmitter {
       return Promise.resolve();
     }),
     url: jest.fn(() => 'https://web.whatsapp.com/'),
+    mainFrame: jest.fn(() => this.mainFrameToken),
     once: jest.fn(),
+    on: jest.fn(),
   };
   info = { wid: { user: '77001234567' }, pushname: 'Test' };
 }
@@ -54,6 +58,7 @@ type Internals = {
   client: FakeClient | null;
   authStrategy: { logout: jest.Mock<Promise<void>, []> } | null;
   recoveryPromise: Promise<void> | null;
+  navigationStabilization: unknown;
   markRuntimeUnhealthy(
     client: FakeClient,
     generation: number,
@@ -75,6 +80,7 @@ describe('WhatsAppClientService lifecycle', () => {
   let upsert: jest.Mock<Promise<Record<string, unknown>>, [UpsertArg]>;
 
   beforeEach(() => {
+    process.env.WHATSAPP_RUNTIME_NAVIGATION_GRACE_MS = '100';
     clients = [];
     session = { status: WhatsAppConnectionStatus.IDLE };
     upsert = jest.fn(({ create, update }: UpsertArg) => {
@@ -111,6 +117,25 @@ describe('WhatsAppClientService lifecycle', () => {
   });
 
   const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const navigate = (client: FakeClient) => {
+    const calls = client.pupPage.on.mock.calls as Array<
+      [string, (frame: unknown) => void]
+    >;
+    const listener = calls.find(([event]) => event === 'framenavigated')?.[1];
+    listener?.(client.pupPage.mainFrame());
+  };
+  const pageClose = (client: FakeClient) => {
+    const calls = client.pupPage.once.mock.calls as Array<[string, () => void]>;
+    const listener = calls.find(([event]) => event === 'close')?.[1];
+    listener?.();
+  };
+  const browserDisconnect = (client: FakeClient) => {
+    const calls = client.pupBrowser.once.mock.calls as Array<
+      [string, () => void]
+    >;
+    const listener = calls.find(([event]) => event === 'disconnected')?.[1];
+    listener?.();
+  };
   const ready = async (client?: FakeClient) => {
     await tick();
     (client ?? clients[0]).emit('ready');
@@ -512,6 +537,106 @@ describe('WhatsAppClientService lifecycle', () => {
     await expect(service.getStatus()).resolves.toMatchObject({
       state: 'CONNECTED',
       connected: true,
+    });
+  });
+
+  it('keeps the same CONNECTED generation after healthy internal navigation', async () => {
+    const operation = service.initialize();
+    await ready();
+    await operation;
+
+    navigate(clients[0]);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    await expect(service.getStatus()).resolves.toMatchObject({
+      state: 'CONNECTED',
+      generation: 1,
+      connected: true,
+    });
+    expect(clients).toHaveLength(1);
+    expect(clients[0].destroy).not.toHaveBeenCalled();
+  });
+
+  it('blocks outbound during navigation and enables it after stabilization', async () => {
+    const operation = service.initialize();
+    await ready();
+    await operation;
+
+    navigate(clients[0]);
+    await expect(
+      service.sendText('77001234567@c.us', 'blocked'),
+    ).rejects.toMatchObject({
+      code: 'WHATSAPP_RUNTIME_STABILIZING',
+      retryable: true,
+      outcomeAmbiguous: false,
+    });
+    await expect(
+      service.isRegisteredUser('77001234567@c.us'),
+    ).rejects.toMatchObject({ code: 'WHATSAPP_RUNTIME_STABILIZING' });
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await expect(
+      service.sendText('77001234567@c.us', 'allowed'),
+    ).resolves.toEqual({ id: 'sent' });
+  });
+
+  it('coalesces navigation events and recovers once if runtime stays unhealthy', async () => {
+    const operation = service.initialize();
+    await ready();
+    await operation;
+
+    navigate(clients[0]);
+    navigate(clients[0]);
+    navigate(clients[0]);
+    clients[0].pupPage.isClosed.mockReturnValue(true);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await tick();
+
+    expect(clients).toHaveLength(2);
+    await ready(clients[1]);
+    await (service as unknown as Internals).recoveryPromise;
+    expect(clients[0].destroy).toHaveBeenCalledTimes(1);
+    await expect(service.getStatus()).resolves.toMatchObject({
+      state: 'CONNECTED',
+      generation: 2,
+    });
+  });
+
+  it('navigation plus browser disconnect starts exactly one recovery', async () => {
+    const operation = service.initialize();
+    await ready();
+    await operation;
+
+    navigate(clients[0]);
+    clients[0].pupBrowser.isConnected.mockReturnValue(false);
+    browserDisconnect(clients[0]);
+    browserDisconnect(clients[0]);
+    await tick();
+
+    expect(clients).toHaveLength(2);
+    await ready(clients[1]);
+    await (service as unknown as Internals).recoveryPromise;
+    expect(clients[0].destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores page close emitted by controlled cleanup', async () => {
+    const operation = service.initialize();
+    await ready();
+    await operation;
+    const oldClient = clients[0];
+
+    const reconnect = service.reconnect();
+    await tick();
+    pageClose(oldClient);
+    browserDisconnect(oldClient);
+    await ready(clients[1]);
+    await reconnect;
+
+    expect(clients).toHaveLength(2);
+    expect(oldClient.destroy).toHaveBeenCalledTimes(1);
+    await expect(service.getStatus()).resolves.toMatchObject({
+      state: 'CONNECTED',
+      generation: 2,
     });
   });
 

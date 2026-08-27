@@ -48,6 +48,17 @@ export class WhatsAppRuntimeError extends Error {
   }
 }
 
+export class WhatsAppRuntimeStabilizingError extends Error {
+  readonly code = 'WHATSAPP_RUNTIME_STABILIZING';
+  readonly retryable = true;
+  readonly outcomeAmbiguous = false;
+
+  constructor() {
+    super('WhatsApp Web runtime is temporarily stabilizing after navigation');
+    this.name = 'WhatsAppRuntimeStabilizingError';
+  }
+}
+
 @Injectable()
 export class WhatsAppClientService
   implements OnModuleInit, OnApplicationShutdown
@@ -77,6 +88,12 @@ export class WhatsAppClientService
   private ownsRuntimeLock = false;
   private recoveryPromise: Promise<void> | null = null;
   private readonly healthBoundClients = new WeakSet<Client>();
+  private navigationStabilization: {
+    client: Client;
+    generation: number;
+    startedAt: number;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -321,11 +338,13 @@ export class WhatsAppClientService
 
   async isRegisteredUser(chatId: string) {
     this.ensureConnected();
+    this.ensureRuntimeNotStabilizing();
     return this.client!.isRegisteredUser(chatId);
   }
 
   async sendText(chatId: string, text: string) {
     this.ensureConnected();
+    this.ensureRuntimeNotStabilizing();
     const client = this.client!;
     const generation = this.generation;
     const health = this.runtimeHealth(client, generation);
@@ -486,6 +505,7 @@ export class WhatsAppClientService
 
   private async performReconnect(previousOperation: Promise<unknown> | null) {
     const startedAt = Date.now();
+    this.cancelNavigationStabilization();
     this.logLifecycle('WHATSAPP_RECONNECT_STARTED', this.generation);
     await this.transitionTo('DISCONNECTING');
     this.cancelInitialization();
@@ -517,6 +537,7 @@ export class WhatsAppClientService
     previousOperation: Promise<unknown> | null,
   ) {
     const startedAt = Date.now();
+    this.cancelNavigationStabilization();
     await this.transitionTo('DISCONNECTING');
     this.logLifecycle(
       'WHATSAPP_DISCONNECT_STARTED',
@@ -567,6 +588,7 @@ export class WhatsAppClientService
 
   private async performLogout() {
     const startedAt = Date.now();
+    this.cancelNavigationStabilization();
     await this.transitionTo('LOGGING_OUT');
     this.logLifecycle('WHATSAPP_LOGOUT_STARTED', this.generation, 'log');
     const client = this.client!;
@@ -897,6 +919,8 @@ export class WhatsAppClientService
     if (this.healthBoundClients.has(client)) return;
     this.healthBoundClients.add(client);
     client.pupBrowser?.once('disconnected', () => {
+      if (this.ignoreExpectedRuntimeClose(client, generation, 'browser'))
+        return;
       this.logger.error({
         event: 'WHATSAPP_BROWSER_DISCONNECTED',
         generation,
@@ -908,6 +932,7 @@ export class WhatsAppClientService
       );
     });
     client.pupPage?.once('close', () => {
+      if (this.ignoreExpectedRuntimeClose(client, generation, 'page')) return;
       this.logger.error({ event: 'WHATSAPP_PAGE_CLOSED', generation });
       void this.markRuntimeUnhealthy(
         client,
@@ -918,17 +943,142 @@ export class WhatsAppClientService
     client.pupPage?.once('error', (error) => {
       void this.markRuntimeUnhealthy(client, generation, error);
     });
-    client.pupPage?.once('framenavigated', () => {
+    client.pupPage?.on('framenavigated', (frame) => {
+      if (frame !== client.pupPage?.mainFrame()) return;
       if (this.state !== 'CONNECTED') return;
-      void this.markRuntimeUnhealthy(
-        client,
-        generation,
-        new WhatsAppRuntimeError(
-          'WhatsApp Web navigated after runtime became connected',
-          false,
-        ),
-      );
+      this.handlePostReadyNavigation(client, generation);
     });
+  }
+
+  private ensureRuntimeNotStabilizing() {
+    const stabilization = this.navigationStabilization;
+    if (
+      stabilization &&
+      stabilization.client === this.client &&
+      stabilization.generation === this.generation
+    ) {
+      throw new WhatsAppRuntimeStabilizingError();
+    }
+  }
+
+  private handlePostReadyNavigation(client: Client, generation: number) {
+    if (client !== this.client || generation !== this.generation) return;
+    this.logger.warn({
+      event: 'WHATSAPP_RUNTIME_NAVIGATION_DETECTED',
+      generation,
+      state: this.state,
+    });
+    if (this.navigationStabilization) return;
+
+    const startedAt = Date.now();
+    const graceMs = this.navigationGraceMs();
+    this.logger.warn({
+      event: 'WHATSAPP_RUNTIME_STABILIZATION_STARTED',
+      generation,
+      state: this.state,
+      durationMs: graceMs,
+    });
+    const timer = setTimeout(() => {
+      void this.finishNavigationStabilization(client, generation, startedAt);
+    }, graceMs);
+    this.navigationStabilization = { client, generation, startedAt, timer };
+  }
+
+  private async finishNavigationStabilization(
+    client: Client,
+    generation: number,
+    startedAt: number,
+  ) {
+    const stabilization = this.navigationStabilization;
+    if (
+      !stabilization ||
+      stabilization.client !== client ||
+      stabilization.generation !== generation
+    ) {
+      return;
+    }
+    this.navigationStabilization = null;
+    const health = this.runtimeHealth(client, generation);
+    const healthy =
+      client === this.client &&
+      generation === this.generation &&
+      this.state === 'CONNECTED' &&
+      health.browserConnected &&
+      !health.pageClosed &&
+      (await this.hasConnectedProviderState(client));
+    const durationMs = Date.now() - startedAt;
+    if (healthy) {
+      this.logger.log({
+        event: 'WHATSAPP_RUNTIME_NAVIGATION_RECOVERED',
+        generation,
+        state: this.state,
+        durationMs,
+      });
+      return;
+    }
+    this.logger.error({
+      event: 'WHATSAPP_RUNTIME_NAVIGATION_FAILED',
+      generation,
+      durationMs,
+      ...health,
+    });
+    this.markRuntimeUnhealthy(
+      client,
+      generation,
+      new WhatsAppRuntimeError(
+        'WhatsApp Web did not recover after navigation grace period',
+        false,
+      ),
+      health,
+    );
+  }
+
+  private async hasConnectedProviderState(client: Client) {
+    try {
+      return String(await client.getState()) === 'CONNECTED';
+    } catch {
+      return false;
+    }
+  }
+
+  private navigationGraceMs() {
+    const configured = Number(
+      process.env.WHATSAPP_RUNTIME_NAVIGATION_GRACE_MS ?? 7000,
+    );
+    return Number.isFinite(configured) && configured >= 100
+      ? Math.min(configured, 30_000)
+      : 7000;
+  }
+
+  private ignoreExpectedRuntimeClose(
+    client: Client,
+    generation: number,
+    kind: 'page' | 'browser',
+  ) {
+    const expected =
+      client !== this.client ||
+      generation !== this.generation ||
+      this.state === 'DISCONNECTING' ||
+      this.state === 'LOGGING_OUT' ||
+      this.state === 'ERROR' ||
+      Boolean(this.recoveryPromise);
+    if (!expected) return false;
+    this.logger.log({
+      event:
+        kind === 'page'
+          ? 'WHATSAPP_EXPECTED_PAGE_CLOSE_IGNORED'
+          : 'WHATSAPP_EXPECTED_BROWSER_DISCONNECT_IGNORED',
+      generation,
+      state: this.state,
+      durationMs: 0,
+    });
+    return true;
+  }
+
+  private cancelNavigationStabilization() {
+    if (!this.navigationStabilization) return;
+    clearTimeout(this.navigationStabilization.timer);
+    this.navigationStabilization = null;
   }
 
   private runtimeHealth(client: Client, generation: number) {
@@ -966,6 +1116,7 @@ export class WhatsAppClientService
     ) {
       return;
     }
+    this.cancelNavigationStabilization();
     const message = error instanceof Error ? error.message : String(error);
     if (message.toLowerCase().includes('execution context was destroyed')) {
       this.logger.error({
