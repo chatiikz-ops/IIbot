@@ -34,11 +34,7 @@ describe('WhatsAppMessagingService acknowledgements', () => {
     [
       MessageAck.ACK_SERVER,
       WhatsAppMessageStatus.SENT,
-      [
-        WhatsAppMessageStatus.PENDING,
-        WhatsAppMessageStatus.OUTCOME_UNKNOWN,
-        WhatsAppMessageStatus.FAILED,
-      ],
+      [WhatsAppMessageStatus.PENDING, WhatsAppMessageStatus.OUTCOME_UNKNOWN],
     ],
     [
       MessageAck.ACK_DEVICE,
@@ -46,7 +42,6 @@ describe('WhatsAppMessagingService acknowledgements', () => {
       [
         WhatsAppMessageStatus.PENDING,
         WhatsAppMessageStatus.OUTCOME_UNKNOWN,
-        WhatsAppMessageStatus.FAILED,
         WhatsAppMessageStatus.SENT,
       ],
     ],
@@ -56,7 +51,6 @@ describe('WhatsAppMessagingService acknowledgements', () => {
       [
         WhatsAppMessageStatus.PENDING,
         WhatsAppMessageStatus.OUTCOME_UNKNOWN,
-        WhatsAppMessageStatus.FAILED,
         WhatsAppMessageStatus.SENT,
         WhatsAppMessageStatus.DELIVERED,
       ],
@@ -67,7 +61,6 @@ describe('WhatsAppMessagingService acknowledgements', () => {
       [
         WhatsAppMessageStatus.PENDING,
         WhatsAppMessageStatus.OUTCOME_UNKNOWN,
-        WhatsAppMessageStatus.FAILED,
         WhatsAppMessageStatus.SENT,
         WhatsAppMessageStatus.DELIVERED,
       ],
@@ -75,7 +68,11 @@ describe('WhatsAppMessagingService acknowledgements', () => {
     [
       MessageAck.ACK_ERROR,
       WhatsAppMessageStatus.FAILED,
-      [WhatsAppMessageStatus.PENDING],
+      [
+        WhatsAppMessageStatus.PENDING,
+        WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+        WhatsAppMessageStatus.SENT,
+      ],
     ],
   ])('maps ACK %s monotonically to %s', async (ack, status, eligible) => {
     await service.handleAck(message, ack);
@@ -166,11 +163,14 @@ describe('WhatsAppMessagingService late ACK reconciliation', () => {
     const prisma = {
       whatsAppMessage: {
         updateMany,
-        findFirst: jest.fn().mockResolvedValue({
-          id: 'wa-unknown',
-          status: WhatsAppMessageStatus.OUTCOME_UNKNOWN,
-          sentAt: null,
-        }),
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'wa-unknown',
+            externalMessageId: null,
+            status: WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+            sentAt: null,
+          },
+        ]),
       },
     };
     const service = new WhatsAppMessagingService(
@@ -187,7 +187,13 @@ describe('WhatsAppMessagingService late ACK reconciliation', () => {
       ack,
     );
     expect(updateMany).toHaveBeenLastCalledWith({
-      where: { id: 'wa-unknown', externalMessageId: null },
+      where: {
+        id: 'wa-unknown',
+        externalMessageId: null,
+        // Jest's asymmetric matcher is intentionally dynamic here.
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        status: { in: expect.any(Array) },
+      },
       // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       data: expect.objectContaining({
         externalMessageId: 'provider-id',
@@ -199,6 +205,60 @@ describe('WhatsAppMessagingService late ACK reconciliation', () => {
 });
 
 describe('WhatsAppMessagingService outbound idempotency', () => {
+  it('marks SENT only when sendMessage returns a real provider ID', async () => {
+    let stored = {
+      id: 'wa-real-id',
+      messageId: 'ai-real-id',
+      status: WhatsAppMessageStatus.PENDING,
+      externalMessageId: null as string | null,
+      sentAt: null as Date | null,
+      errorMessage: null as string | null,
+    };
+    const prisma = {
+      whatsAppMessage: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        findUniqueOrThrow: jest.fn(() => Promise.resolve(stored)),
+        create: jest.fn(() => Promise.resolve(stored)),
+        updateMany: jest.fn(({ data }: { data: Partial<typeof stored> }) => {
+          stored = { ...stored, ...data };
+          return Promise.resolve({ count: 1 });
+        }),
+      },
+      message: { findFirst: jest.fn().mockResolvedValue({ id: 'ai-real-id' }) },
+      contact: { findFirst: jest.fn().mockResolvedValue({ id: 'contact-1' }) },
+    };
+    const client = {
+      onMessage: jest.fn(),
+      onAck: jest.fn(),
+      getGeneration: jest.fn(() => 4),
+      isRegisteredUser: jest.fn().mockResolvedValue(true),
+      sendText: jest.fn().mockResolvedValue({
+        id: { _serialized: 'true_77086810693@c.us_REAL' },
+      }),
+    };
+    const service = new WhatsAppMessagingService(
+      prisma as never,
+      client as never,
+      {} as never,
+    );
+
+    await expect(
+      service.sendAiMessage({
+        contactId: 'contact-1',
+        conversationId: 'conversation-1',
+        messageId: 'ai-real-id',
+        phone: '+77086810693',
+        text: 'Confirmed directly',
+      }),
+    ).resolves.toMatchObject({
+      outcomePending: false,
+      whatsappMessage: {
+        status: WhatsAppMessageStatus.SENT,
+        externalMessageId: 'true_77086810693@c.us_REAL',
+      },
+    });
+  });
+
   it('calls transport once when provider throws after a possible send', async () => {
     const outbound = {
       id: 'wa-outbound-unknown',
@@ -313,6 +373,182 @@ describe('WhatsAppMessagingService outbound idempotency', () => {
       whatsappMessage: { status: WhatsAppMessageStatus.OUTCOME_UNKNOWN },
     });
     expect(stored.errorMessage).toContain('returned no message ID');
+    expect(stored.externalMessageId).toBeNull();
+  });
+
+  it('uses message_create to confirm an undefined sendMessage result', async () => {
+    const outbound = {
+      id: 'wa-message-create',
+      messageId: 'ai-message-create',
+      status: WhatsAppMessageStatus.PENDING,
+      externalMessageId: null as string | null,
+      sentAt: null as Date | null,
+      errorMessage: null as string | null,
+    };
+    let stored = { ...outbound };
+    let messageCreateHandler:
+      ((message: unknown, generation: number) => Promise<void>) | undefined;
+    const prisma = {
+      whatsAppMessage: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        findUniqueOrThrow: jest.fn(() => Promise.resolve(stored)),
+        create: jest.fn(() => Promise.resolve(stored)),
+        updateMany: jest.fn(
+          ({
+            where,
+            data,
+          }: {
+            where: { status?: { in: WhatsAppMessageStatus[] } };
+            data: Partial<typeof stored>;
+          }) => {
+            if (!where.status || where.status.in.includes(stored.status)) {
+              stored = { ...stored, ...data };
+              return Promise.resolve({ count: 1 });
+            }
+            return Promise.resolve({ count: 0 });
+          },
+        ),
+      },
+      message: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'ai-message-create' }),
+      },
+      contact: { findFirst: jest.fn().mockResolvedValue({ id: 'contact-1' }) },
+    };
+    const client = {
+      onMessage: jest.fn(),
+      onAck: jest.fn(),
+      onMessageCreate: jest.fn(
+        (handler: (message: unknown, generation: number) => Promise<void>) => {
+          messageCreateHandler = handler;
+        },
+      ),
+      getGeneration: jest.fn(() => 7),
+      isRegisteredUser: jest.fn().mockResolvedValue(true),
+      sendText: jest.fn(async () => {
+        await messageCreateHandler?.(
+          {
+            id: {
+              _serialized: 'true_53296299557012@lid_PROVIDER',
+              remote: '53296299557012@lid',
+              fromMe: true,
+            },
+            fromMe: true,
+            to: '53296299557012@lid',
+            body: 'Confirmed by event',
+            timestamp: Math.floor(Date.now() / 1000),
+          },
+          7,
+        );
+        return undefined;
+      }),
+    };
+    const service = new WhatsAppMessagingService(
+      prisma as never,
+      client as never,
+      {} as never,
+    );
+
+    await expect(
+      service.sendAiMessage({
+        contactId: 'contact-1',
+        conversationId: 'conversation-1',
+        messageId: 'ai-message-create',
+        phone: '+77086810693',
+        text: 'Confirmed by event',
+      }),
+    ).resolves.toMatchObject({
+      outcomePending: false,
+      whatsappMessage: {
+        status: WhatsAppMessageStatus.SENT,
+        externalMessageId: 'true_53296299557012@lid_PROVIDER',
+      },
+    });
+  });
+
+  it('correlates ACK_ERROR to a fallback row and replaces it with provider ID', async () => {
+    const fallback = {
+      id: 'wa-fallback',
+      externalMessageId: 'fallback:sha256:legacy',
+      status: WhatsAppMessageStatus.SENT,
+      sentAt: new Date(),
+    };
+    const updateMany = jest
+      .fn()
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValueOnce({ count: 1 });
+    const prisma = {
+      whatsAppMessage: {
+        updateMany,
+        findMany: jest.fn().mockResolvedValue([fallback]),
+      },
+    };
+    const service = new WhatsAppMessagingService(
+      prisma as never,
+      { onMessage: jest.fn(), onAck: jest.fn() } as never,
+      {} as never,
+    );
+
+    await service.handleAck(
+      {
+        id: {
+          _serialized: 'true_53296299557012@lid_REAL',
+          remote: '53296299557012@lid',
+          fromMe: true,
+        },
+        fromMe: true,
+        to: '53296299557012@lid',
+        body: 'Legacy fallback',
+      } as never,
+      MessageAck.ACK_ERROR,
+      9,
+    );
+
+    expect(updateMany).toHaveBeenLastCalledWith({
+      where: {
+        id: 'wa-fallback',
+        externalMessageId: 'fallback:sha256:legacy',
+        status: {
+          in: [
+            WhatsAppMessageStatus.PENDING,
+            WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+            WhatsAppMessageStatus.SENT,
+          ],
+        },
+      },
+      data: {
+        externalMessageId: 'true_53296299557012@lid_REAL',
+        status: WhatsAppMessageStatus.FAILED,
+        errorMessage: 'WhatsApp provider returned ACK_ERROR',
+      },
+    });
+  });
+
+  it('does not correlate an ACK when multiple pending rows match', async () => {
+    const updateMany = jest.fn().mockResolvedValue({ count: 0 });
+    const prisma = {
+      whatsAppMessage: {
+        updateMany,
+        findMany: jest
+          .fn()
+          .mockResolvedValue([{ id: 'candidate-1' }, { id: 'candidate-2' }]),
+      },
+    };
+    const service = new WhatsAppMessagingService(
+      prisma as never,
+      { onMessage: jest.fn(), onAck: jest.fn() } as never,
+      {} as never,
+    );
+
+    await service.handleAck(
+      {
+        id: { _serialized: 'another-provider-id' },
+        fromMe: true,
+        to: '77086810693@c.us',
+        body: 'Same body',
+      } as never,
+      MessageAck.ACK_SERVER,
+    );
+    expect(updateMany).toHaveBeenCalledTimes(1);
   });
 
   it('does not call the transport again for an already SENT AI message', async () => {

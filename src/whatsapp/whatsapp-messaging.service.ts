@@ -6,6 +6,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { createHash, randomUUID } from 'node:crypto';
 import { MessageAck, type Message as WebMessage } from 'whatsapp-web.js';
 import { normalizePhone } from '../common/utils/phone.util';
 import { isTerminalConversationStatus } from '../conversations/conversation-status';
@@ -59,6 +60,17 @@ export class WhatsAppMessagingService {
   private readonly knownInboundHandlers: Array<
     (message: KnownInboundMessage) => Promise<void>
   > = [];
+  private readonly pendingOutbound = new Map<
+    string,
+    {
+      token: string;
+      whatsAppMessageId: string;
+      generation: number;
+      chatId: string;
+      bodyHash: string;
+      createdAt: number;
+    }
+  >();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -66,7 +78,12 @@ export class WhatsAppMessagingService {
     private readonly media: MediaProcessingService,
   ) {
     this.client.onMessage((message) => this.handleInbound(message));
-    this.client.onAck((message, ack) => this.handleAck(message, ack));
+    this.client.onMessageCreate?.((message, generation) =>
+      this.handleMessageCreate(message, generation),
+    );
+    this.client.onAck((message, ack, generation) =>
+      this.handleAck(message, ack, generation),
+    );
   }
 
   onKnownInbound(handler: (message: KnownInboundMessage) => Promise<void>) {
@@ -119,6 +136,11 @@ export class WhatsAppMessagingService {
       whatsAppMessageId: pending.id,
     });
     let sent: WebMessage | null | undefined;
+    const pendingToken = this.trackPendingOutbound(
+      pending.id,
+      chatId,
+      data.text,
+    );
     try {
       sent = await this.client.sendText(chatId, data.text);
     } catch (error) {
@@ -130,7 +152,8 @@ export class WhatsAppMessagingService {
       return {
         whatsappMessage: this.safeMessage(whatsappMessage),
         alreadySent: false,
-        outcomePending: true,
+        outcomePending:
+          whatsappMessage.status === WhatsAppMessageStatus.OUTCOME_UNKNOWN,
       };
     }
 
@@ -150,12 +173,22 @@ export class WhatsAppMessagingService {
       return {
         whatsappMessage: this.safeMessage(whatsappMessage),
         alreadySent: false,
-        outcomePending: true,
+        outcomePending:
+          whatsappMessage.status === WhatsAppMessageStatus.OUTCOME_UNKNOWN,
       };
     }
+    this.pendingOutbound.delete(pendingToken);
     const externalMessageId = identity.value;
-    const whatsappMessage = await this.prisma.whatsAppMessage.update({
-      where: { id: pending.id },
+    await this.prisma.whatsAppMessage.updateMany({
+      where: {
+        id: pending.id,
+        status: {
+          in: [
+            WhatsAppMessageStatus.PENDING,
+            WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+          ],
+        },
+      },
       data: {
         externalMessageId,
         status: WhatsAppMessageStatus.SENT,
@@ -163,6 +196,11 @@ export class WhatsAppMessagingService {
         errorMessage: null,
       },
     });
+    const whatsappMessage = await this.prisma.whatsAppMessage.findUniqueOrThrow(
+      {
+        where: { id: pending.id },
+      },
+    );
     return {
       whatsappMessage: this.safeMessage(whatsappMessage),
       alreadySent: false,
@@ -215,9 +253,23 @@ export class WhatsAppMessagingService {
         text: data.text,
       },
     });
+    const pendingToken = this.trackPendingOutbound(
+      record.id,
+      chatId,
+      data.text,
+    );
     try {
       const sent = await this.client.sendText(chatId, data.text);
-      const externalMessageId = WhatsAppClientService.externalMessageId(sent);
+      const identity = WhatsAppClientService.externalMessageIdentity(sent);
+      if (identity.source === 'FALLBACK_ID') {
+        const unknown = await this.markOutcomeUnknown(
+          record.id,
+          'WhatsApp provider returned no message ID; automatic retry disabled',
+        );
+        return this.safeMessage(unknown);
+      }
+      this.pendingOutbound.delete(pendingToken);
+      const externalMessageId = identity.value;
       const updated = await this.prisma.whatsAppMessage.update({
         where: { id: record.id },
         data: {
@@ -271,9 +323,25 @@ export class WhatsAppMessagingService {
       return { conversation, whatsappMessage };
     });
 
+    const pendingToken = this.trackPendingOutbound(
+      prepared.whatsappMessage.id,
+      chatId,
+      data.text,
+    );
     try {
       const sent = await this.client.sendText(chatId, data.text);
-      const externalMessageId = WhatsAppClientService.externalMessageId(sent);
+      const identity = WhatsAppClientService.externalMessageIdentity(sent);
+      if (identity.source === 'FALLBACK_ID') {
+        await this.markOutcomeUnknown(
+          prepared.whatsappMessage.id,
+          'WhatsApp provider returned no message ID; automatic retry disabled',
+        );
+        throw new BadGatewayException(
+          'WhatsApp accepted the send attempt without a provider message ID',
+        );
+      }
+      this.pendingOutbound.delete(pendingToken);
+      const externalMessageId = identity.value;
       const result = await this.prisma.$transaction(async (tx) => {
         const message = await tx.message.create({
           data: {
@@ -315,7 +383,8 @@ export class WhatsAppMessagingService {
         message: result.message,
         conversationId: result.conversationId,
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof BadGatewayException) throw error;
       await this.markFailed(prepared.whatsappMessage.id);
       throw new BadGatewayException(
         'Не удалось отправить сообщение в WhatsApp',
@@ -597,10 +666,38 @@ export class WhatsAppMessagingService {
     return null;
   }
 
-  async handleAck(message: WebMessage, ack: MessageAck) {
-    const externalMessageId = WhatsAppClientService.externalMessageId(message);
+  async handleMessageCreate(message: WebMessage, generation: number) {
+    const identity = WhatsAppClientService.externalMessageIdentity(message);
+    if (identity.source === 'FALLBACK_ID' || message.fromMe !== true) return;
+    const pending = this.correlatePendingOutbound(message, generation);
+    if (!pending) return;
+    const updated = await this.prisma.whatsAppMessage.updateMany({
+      where: {
+        id: pending.whatsAppMessageId,
+        externalMessageId: null,
+        status: {
+          in: [
+            WhatsAppMessageStatus.PENDING,
+            WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+          ],
+        },
+      },
+      data: {
+        externalMessageId: identity.value,
+        status: WhatsAppMessageStatus.SENT,
+        sentAt: new Date(),
+        errorMessage: null,
+      },
+    });
+    if (updated.count > 0) this.pendingOutbound.delete(pending.token);
+  }
+
+  async handleAck(message: WebMessage, ack: MessageAck, generation = 0) {
+    const identity = WhatsAppClientService.externalMessageIdentity(message);
+    if (identity.source === 'FALLBACK_ID') return;
+    const externalMessageId = identity.value;
     const status = WhatsAppClientService.ackStatus(ack);
-    if (!externalMessageId || !status) return;
+    if (!status) return;
     this.logger.debug(
       JSON.stringify({
         event: 'WHATSAPP_ACK_RECEIVED',
@@ -609,6 +706,15 @@ export class WhatsAppMessagingService {
         mappedStatus: status,
       }),
     );
+    if (ack === MessageAck.ACK_ERROR) {
+      this.logger.error({
+        event: 'WHATSAPP_ACK_ERROR',
+        externalMessageId,
+        recipientType: this.recipientType(message),
+        generation,
+        providerAck: ack,
+      });
+    }
     const updated = await this.prisma.whatsAppMessage.updateMany({
       where: {
         externalMessageId,
@@ -621,8 +727,13 @@ export class WhatsAppMessagingService {
           : {}),
       },
     });
-    if (updated.count === 0 && status !== WhatsAppMessageStatus.FAILED) {
-      await this.reconcileUnknownAck(message, externalMessageId, status);
+    if (updated.count === 0) {
+      await this.reconcileUnknownAck(
+        message,
+        externalMessageId,
+        status,
+        generation,
+      );
     }
   }
 
@@ -631,14 +742,12 @@ export class WhatsAppMessagingService {
       return [
         WhatsAppMessageStatus.PENDING,
         WhatsAppMessageStatus.OUTCOME_UNKNOWN,
-        WhatsAppMessageStatus.FAILED,
       ];
     }
     if (status === WhatsAppMessageStatus.DELIVERED) {
       return [
         WhatsAppMessageStatus.PENDING,
         WhatsAppMessageStatus.OUTCOME_UNKNOWN,
-        WhatsAppMessageStatus.FAILED,
         WhatsAppMessageStatus.SENT,
       ];
     }
@@ -646,13 +755,16 @@ export class WhatsAppMessagingService {
       return [
         WhatsAppMessageStatus.PENDING,
         WhatsAppMessageStatus.OUTCOME_UNKNOWN,
-        WhatsAppMessageStatus.FAILED,
         WhatsAppMessageStatus.SENT,
         WhatsAppMessageStatus.DELIVERED,
       ];
     }
     if (status === WhatsAppMessageStatus.FAILED) {
-      return [WhatsAppMessageStatus.PENDING];
+      return [
+        WhatsAppMessageStatus.PENDING,
+        WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+        WhatsAppMessageStatus.SENT,
+      ];
     }
     return [];
   }
@@ -661,35 +773,126 @@ export class WhatsAppMessagingService {
     message: WebMessage,
     externalMessageId: string,
     status: WhatsAppMessageStatus,
+    generation: number,
   ) {
+    const inMemory = this.correlatePendingOutbound(message, generation);
+    const candidates = inMemory
+      ? [
+          await this.prisma.whatsAppMessage.findUnique({
+            where: { id: inMemory.whatsAppMessageId },
+          }),
+        ].filter((candidate) => candidate !== null)
+      : await this.findDatabaseAckCandidates(message);
+    if (candidates.length !== 1) return;
+    const candidate = candidates[0];
+    if (!candidate) return;
+    const previousExternalId = candidate.externalMessageId;
+    const updated = await this.prisma.whatsAppMessage.updateMany({
+      where: {
+        id: candidate.id,
+        externalMessageId: previousExternalId,
+        status: {
+          in: this.ackUpdatableStatuses(status),
+        },
+      },
+      data: {
+        externalMessageId,
+        status,
+        ...(status === WhatsAppMessageStatus.FAILED
+          ? { errorMessage: 'WhatsApp provider returned ACK_ERROR' }
+          : {
+              sentAt: candidate.sentAt ?? new Date(),
+              errorMessage: null,
+            }),
+      },
+    });
+    if (updated.count > 0 && inMemory) {
+      this.pendingOutbound.delete(inMemory.token);
+    }
+  }
+
+  private async findDatabaseAckCandidates(message: WebMessage) {
     const phone = this.fromChatId(message.to);
-    if (!phone) return;
-    const candidate = await this.prisma.whatsAppMessage.findFirst({
+    const createdAfter = new Date(Date.now() - 30_000);
+    return this.prisma.whatsAppMessage.findMany({
       where: {
         direction: WhatsAppMessageDirection.OUTBOUND,
-        externalMessageId: null,
-        phone,
+        ...(phone ? { phone } : {}),
         text: message.body,
+        createdAt: { gte: createdAfter },
+        OR: [
+          { externalMessageId: null },
+          { externalMessageId: { startsWith: 'fallback:sha256:' } },
+        ],
         status: {
           in: [
             WhatsAppMessageStatus.PENDING,
             WhatsAppMessageStatus.OUTCOME_UNKNOWN,
-            WhatsAppMessageStatus.FAILED,
+            WhatsAppMessageStatus.SENT,
           ],
         },
       },
       orderBy: { createdAt: 'desc' },
+      take: 2,
     });
-    if (!candidate) return;
-    await this.prisma.whatsAppMessage.updateMany({
-      where: { id: candidate.id, externalMessageId: null },
-      data: {
-        externalMessageId,
-        status,
-        sentAt: candidate.sentAt ?? new Date(),
-        errorMessage: null,
-      },
+  }
+
+  private trackPendingOutbound(
+    whatsAppMessageId: string,
+    chatId: string,
+    body: string,
+  ) {
+    this.prunePendingOutbound();
+    const token = randomUUID();
+    this.pendingOutbound.set(token, {
+      token,
+      whatsAppMessageId,
+      generation: this.client.getGeneration?.() ?? 0,
+      chatId,
+      bodyHash: this.bodyHash(body),
+      createdAt: Date.now(),
     });
+    return token;
+  }
+
+  private correlatePendingOutbound(message: WebMessage, generation: number) {
+    this.prunePendingOutbound();
+    if (message.fromMe !== true) return null;
+    const messageTime = Number.isFinite(message.timestamp)
+      ? Number(message.timestamp) * 1000
+      : Date.now();
+    const recipient = message.to ?? message.id?.remote ?? '';
+    const candidates = [...this.pendingOutbound.values()].filter(
+      (pending) =>
+        pending.generation === generation &&
+        pending.bodyHash === this.bodyHash(message.body ?? '') &&
+        Math.abs(messageTime - pending.createdAt) <= 30_000 &&
+        this.recipientsCompatible(pending.chatId, recipient),
+    );
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+
+  private recipientsCompatible(expected: string, actual: string) {
+    if (expected === actual) return true;
+    return actual.endsWith('@lid') && expected.endsWith('@c.us');
+  }
+
+  private prunePendingOutbound() {
+    const cutoff = Date.now() - 60_000;
+    for (const [token, pending] of this.pendingOutbound) {
+      if (pending.createdAt < cutoff) this.pendingOutbound.delete(token);
+    }
+  }
+
+  private bodyHash(body: string) {
+    return createHash('sha256').update(body).digest('hex');
+  }
+
+  private recipientType(message: WebMessage) {
+    const recipient = message.to ?? message.id?.remote ?? '';
+    if (recipient.endsWith('@lid')) return '@lid';
+    if (recipient.endsWith('@c.us')) return '@c.us';
+    return 'unknown';
   }
 
   private async findOrCreateConversation(

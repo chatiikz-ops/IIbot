@@ -20,7 +20,15 @@ import { PrismaService } from '../prisma/prisma.service';
 import { WhatsAppConfigService } from './whatsapp-config.service';
 
 type MessageHandler = (message: WebMessage) => Promise<void>;
-type AckHandler = (message: WebMessage, ack: MessageAck) => Promise<void>;
+type MessageCreateHandler = (
+  message: WebMessage,
+  generation: number,
+) => Promise<void>;
+type AckHandler = (
+  message: WebMessage,
+  ack: MessageAck,
+  generation: number,
+) => Promise<void>;
 export type WhatsAppRuntimeState =
   | 'DISABLED'
   | 'IDLE'
@@ -77,6 +85,7 @@ export class WhatsAppClientService
   private currentQrGeneration: number | null = null;
   private qrEventSequence = 0;
   private readonly messageHandlers: MessageHandler[] = [];
+  private readonly messageCreateHandlers: MessageCreateHandler[] = [];
   private readonly ackHandlers: AckHandler[] = [];
   private generation = 0;
   private operationCompletion: {
@@ -161,8 +170,16 @@ export class WhatsAppClientService
     this.messageHandlers.push(handler);
   }
 
+  onMessageCreate(handler: MessageCreateHandler) {
+    this.messageCreateHandlers.push(handler);
+  }
+
   onAck(handler: AckHandler) {
     this.ackHandlers.push(handler);
+  }
+
+  getGeneration() {
+    return this.generation;
   }
 
   async resolveLidIdentity(lid: string) {
@@ -845,9 +862,18 @@ export class WhatsAppClientService
         );
       }
     });
+    client.on('message_create', (message) => {
+      if (this.client !== client || this.generation !== generation) return;
+      for (const handler of this.messageCreateHandlers) {
+        void handler(message, generation).catch(() =>
+          this.logger.error('Failed to correlate an outbound WhatsApp message'),
+        );
+      }
+    });
     client.on('message_ack', (message, ack) => {
+      if (this.client !== client || this.generation !== generation) return;
       for (const handler of this.ackHandlers) {
-        void handler(message, ack).catch(() =>
+        void handler(message, ack, generation).catch(() =>
           this.logger.error('Failed to persist a WhatsApp acknowledgement'),
         );
       }
