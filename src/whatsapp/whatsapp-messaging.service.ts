@@ -2,6 +2,7 @@ import {
   BadGatewayException,
   BadRequestException,
   ForbiddenException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
@@ -26,6 +27,10 @@ import type { SendWhatsAppMessageDto } from './dto/send-whatsapp-message.dto';
 import type { WhatsAppMessagesQueryDto } from './dto/whatsapp-messages-query.dto';
 import type { WhatsAppUnmatchedQueryDto } from './dto/whatsapp-unmatched-query.dto';
 import { WhatsAppClientService } from './whatsapp-client.service';
+import {
+  WHATSAPP_TRANSPORT,
+  type WhatsAppTransport,
+} from './transport/whatsapp-transport';
 
 export type KnownInboundMessage = {
   contactId: string;
@@ -75,7 +80,7 @@ export class WhatsAppMessagingService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly client: WhatsAppClientService,
+    @Inject(WHATSAPP_TRANSPORT) private readonly client: WhatsAppTransport,
     private readonly media: MediaProcessingService,
   ) {
     this.client.onMessage((message) => this.handleInbound(message));

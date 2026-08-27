@@ -2,6 +2,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Inject,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
@@ -21,7 +22,10 @@ import {
 import { MessagesService } from '../messages/messages.service';
 import { MediaProcessingService } from '../media/media-processing.service';
 import { PromptStrategiesService } from '../prompt-strategies/prompt-strategies.service';
-import { WhatsAppClientService } from '../whatsapp/whatsapp-client.service';
+import {
+  WHATSAPP_TRANSPORT,
+  type WhatsAppTransport,
+} from '../whatsapp/transport/whatsapp-transport';
 import { TelegramNotificationsService } from '../telegram/telegram-notifications.service';
 import {
   WhatsAppMessagingService,
@@ -60,7 +64,8 @@ export class ConversationOrchestratorService {
     private readonly messages: MessagesService,
     private readonly prompts: PromptStrategiesService,
     private readonly ai: AiService,
-    private readonly whatsappClient: WhatsAppClientService,
+    @Inject(WHATSAPP_TRANSPORT)
+    private readonly whatsappClient: WhatsAppTransport,
     private readonly whatsapp: WhatsAppMessagingService,
     private readonly campaigns: CampaignsService,
     media: MediaProcessingService,

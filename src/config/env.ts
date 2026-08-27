@@ -63,8 +63,12 @@ const schema = z
     TELEGRAM_BOT_TOKEN: z.string().optional(),
     TELEGRAM_BOT_USERNAME: z.string().optional(),
     WHATSAPP_ENABLED: booleanString.default('false'),
+    WHATSAPP_TRANSPORT: z
+      .enum(['whatsapp-webjs', 'wppconnect'])
+      .default('whatsapp-webjs'),
     WHATSAPP_CLIENT_ID: z.string().optional(),
     WHATSAPP_SESSION_PATH: z.string().optional(),
+    WHATSAPP_WPPCONNECT_SESSION_PATH: z.string().optional(),
   })
   .superRefine((env, ctx) => {
     const requireValue = (condition: boolean, key: keyof typeof env) => {

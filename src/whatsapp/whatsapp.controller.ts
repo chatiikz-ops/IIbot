@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Inject,
   Get,
   Param,
   ParseUUIDPipe,
@@ -11,7 +12,10 @@ import { SendContactWhatsAppMessageDto } from './dto/send-contact-whatsapp-messa
 import { SendWhatsAppMessageDto } from './dto/send-whatsapp-message.dto';
 import { WhatsAppMessagesQueryDto } from './dto/whatsapp-messages-query.dto';
 import { WhatsAppUnmatchedQueryDto } from './dto/whatsapp-unmatched-query.dto';
-import { WhatsAppClientService } from './whatsapp-client.service';
+import {
+  WHATSAPP_TRANSPORT,
+  type WhatsAppTransport,
+} from './transport/whatsapp-transport';
 import { WhatsAppMessagingService } from './whatsapp-messaging.service';
 import { Roles } from '../auth/auth.decorators';
 import { AdminRole } from '../generated/prisma/enums';
@@ -19,7 +23,7 @@ import { AdminRole } from '../generated/prisma/enums';
 @Controller('whatsapp')
 export class WhatsAppController {
   constructor(
-    private readonly client: WhatsAppClientService,
+    @Inject(WHATSAPP_TRANSPORT) private readonly client: WhatsAppTransport,
     private readonly messaging: WhatsAppMessagingService,
   ) {}
 

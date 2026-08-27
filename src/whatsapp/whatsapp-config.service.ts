@@ -18,6 +18,23 @@ export class WhatsAppConfigService {
     return process.env.WHATSAPP_ENABLED?.trim().toLowerCase() === 'true';
   }
 
+  get transport() {
+    const value = process.env.WHATSAPP_TRANSPORT?.trim() || 'whatsapp-webjs';
+    if (value !== 'whatsapp-webjs' && value !== 'wppconnect') {
+      throw new Error(
+        'WHATSAPP_TRANSPORT must be whatsapp-webjs or wppconnect',
+      );
+    }
+    return value;
+  }
+
+  get wppConnectSessionPath() {
+    return resolve(
+      process.env.WHATSAPP_WPPCONNECT_SESSION_PATH?.trim() ||
+        './storage/wppconnect',
+    );
+  }
+
   get clientId() {
     const value = process.env.WHATSAPP_CLIENT_ID?.trim() || 'zapis-ai-main';
     if (!/^[-_A-Za-z0-9]+$/.test(value)) {

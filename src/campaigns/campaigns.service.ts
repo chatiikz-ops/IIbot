@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
@@ -14,7 +15,10 @@ import {
 } from '../generated/prisma/enums';
 import { PrismaService } from '../prisma/prisma.service';
 import { CampaignSelectionService } from './campaign-selection.service';
-import { WhatsAppClientService } from '../whatsapp/whatsapp-client.service';
+import {
+  WHATSAPP_TRANSPORT,
+  type WhatsAppTransport,
+} from '../whatsapp/transport/whatsapp-transport';
 import type { CampaignLogsQueryDto } from './dto/campaign-logs-query.dto';
 import type { CampaignTargetsQueryDto } from './dto/campaign-targets-query.dto';
 import type { CampaignsQueryDto } from './dto/campaigns-query.dto';
@@ -72,7 +76,7 @@ export class CampaignsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly selection: CampaignSelectionService,
-    private readonly whatsapp: WhatsAppClientService,
+    @Inject(WHATSAPP_TRANSPORT) private readonly whatsapp: WhatsAppTransport,
   ) {}
 
   async previewTargets(data: PreviewCampaignTargetsDto) {

@@ -110,6 +110,8 @@ export class WhatsAppClientService
   ) {}
 
   async onModuleInit() {
+    if ((this.config.transport ?? 'whatsapp-webjs') !== 'whatsapp-webjs')
+      return;
     const runtimeEnabled =
       this.config.enabled &&
       (process.env.NODE_ENV !== 'test' ||
@@ -157,6 +159,8 @@ export class WhatsAppClientService
   }
 
   async onApplicationShutdown() {
+    if ((this.config.transport ?? 'whatsapp-webjs') !== 'whatsapp-webjs')
+      return;
     this.logLifecycle('shutdown_started', this.generation);
     try {
       await this.shutdownRuntime();
