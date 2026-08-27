@@ -49,6 +49,7 @@ type WorkerInternals = {
   launchWithinBoundary(job: TestJob): void;
   executeWithinBoundary(job: TestJob): Promise<void>;
   runCampaignTarget(targetId: string): Promise<Date | null>;
+  claim(type: string): Promise<TestJob | null>;
 };
 
 const invalidOutput = () =>
@@ -118,6 +119,48 @@ describe('AutomationWorkerService failure boundary', () => {
     });
     expect(campaignTarget.updateMany).not.toHaveBeenCalled();
   });
+
+  it.each(['WHATSAPP_NOT_CONNECTED', 'WHATSAPP_RUNTIME_STABILIZING'])(
+    'defers pre-send %s without consuming attempts',
+    async (code) => {
+      const { worker, automationJob, campaignTarget } = createWorker();
+      jest.spyOn(worker, 'runCampaignTarget').mockRejectedValue(
+        Object.assign(new Error(code), {
+          response: { code },
+        }),
+      );
+      worker.active = 1;
+
+      await worker.executeWithinBoundary({
+        id: `job-${code}`,
+        type: AutomationJobType.CAMPAIGN_TARGET,
+        attempts: 3,
+        maxAttempts: 3,
+        campaignTargetId: 'target-1',
+        payload: null,
+      });
+
+      expect(automationJob.update).toHaveBeenCalledWith({
+        where: { id: `job-${code}` },
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        data: expect.objectContaining({
+          status: AutomationJobStatus.PENDING,
+          attempts: { decrement: 1 },
+          errorCode: code,
+          lockedAt: null,
+          lockedBy: null,
+        }),
+      });
+      expect(campaignTarget.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+          data: expect.objectContaining({
+            status: 'QUEUED',
+          }),
+        }),
+      );
+    },
+  );
 
   it('contains an exhausted OpenAI timeout and can process the next campaign job', async () => {
     const { worker, automationJob } = createWorker();
@@ -357,5 +400,24 @@ describe('AutomationWorkerService failure boundary', () => {
         },
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('AutomationWorkerService campaign claim eligibility', () => {
+  it('claims campaign jobs only when their campaign is RUNNING', async () => {
+    let sql = '';
+    const queryRaw = jest.fn((strings: TemplateStringsArray) => {
+      sql = strings.join('?');
+      return Promise.resolve([]);
+    });
+    const worker = new AutomationWorkerService(
+      { $queryRaw: queryRaw } as unknown as PrismaService,
+      {} as ConversationOrchestratorService,
+    ) as unknown as WorkerInternals;
+
+    await worker.claim(AutomationJobType.CAMPAIGN_TARGET);
+
+    expect(sql).toContain('FROM "Campaign" campaign');
+    expect(sql).toContain('campaign."status" = \'RUNNING\'');
   });
 });

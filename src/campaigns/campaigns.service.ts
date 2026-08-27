@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '../generated/prisma/client';
@@ -67,6 +68,7 @@ const OPEN_TARGET_STATUSES = new Set<CampaignTargetStatus>([
 
 @Injectable()
 export class CampaignsService {
+  private readonly logger = new Logger(CampaignsService.name);
   constructor(
     private readonly prisma: PrismaService,
     private readonly selection: CampaignSelectionService,
@@ -799,6 +801,76 @@ export class CampaignsService {
         campaign.status,
         next,
       );
+      if (next === CampaignStatus.CANCELLED) {
+        const now = new Date();
+        const jobs = await tx.automationJob.updateMany({
+          where: {
+            campaignId: id,
+            type: 'CAMPAIGN_TARGET',
+            status: { in: ['PENDING', 'PROCESSING'] },
+          },
+          data: {
+            status: 'CANCELLED',
+            completedAt: now,
+            lockedAt: null,
+            lockedBy: null,
+          },
+        });
+        await tx.campaignTarget.updateMany({
+          where: {
+            campaignId: id,
+            messageSentAt: null,
+            status: {
+              in: [
+                CampaignTargetStatus.WAITING,
+                CampaignTargetStatus.READY,
+                CampaignTargetStatus.QUEUED,
+                CampaignTargetStatus.PROCESSING,
+              ],
+            },
+          },
+          data: {
+            status: CampaignTargetStatus.SKIPPED,
+            completedAt: now,
+            errorMessage: 'Campaign cancelled before outbound send',
+          },
+        });
+        this.logger.log({
+          event: 'CAMPAIGN_CANCEL_JOBS_CLEANED',
+          campaignId: id,
+          jobsCount: jobs.count,
+        });
+      } else if (next === CampaignStatus.PAUSED) {
+        const jobsCount = await tx.automationJob.count({
+          where: {
+            campaignId: id,
+            type: 'CAMPAIGN_TARGET',
+            status: 'PENDING',
+          },
+        });
+        this.logger.log({
+          event: 'CAMPAIGN_PAUSED_JOB_DEFERRED',
+          campaignId: id,
+          jobsCount,
+        });
+      } else if (
+        next === CampaignStatus.RUNNING &&
+        campaign.status === CampaignStatus.PAUSED
+      ) {
+        const released = await tx.automationJob.updateMany({
+          where: {
+            campaignId: id,
+            type: 'CAMPAIGN_TARGET',
+            status: 'PENDING',
+          },
+          data: { runAt: new Date() },
+        });
+        this.logger.log({
+          event: 'CAMPAIGN_RESUMED_JOBS_RELEASED',
+          campaignId: id,
+          jobsCount: released.count,
+        });
+      }
       return updated;
     });
   }

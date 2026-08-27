@@ -12,6 +12,7 @@ import { normalizePhone } from '../common/utils/phone.util';
 import { isTerminalConversationStatus } from '../conversations/conversation-status';
 import { Prisma } from '../generated/prisma/client';
 import {
+  CampaignStatus,
   ConversationStatus,
   MessageRole,
   MediaType,
@@ -727,6 +728,9 @@ export class WhatsAppMessagingService {
           : {}),
       },
     });
+    if (updated.count > 0) {
+      await this.recordColdCampaignAck(externalMessageId, ack);
+    }
     if (updated.count === 0) {
       await this.reconcileUnknownAck(
         message,
@@ -808,6 +812,107 @@ export class WhatsAppMessagingService {
     });
     if (updated.count > 0 && inMemory) {
       this.pendingOutbound.delete(inMemory.token);
+    }
+    if (updated.count > 0) {
+      await this.recordColdCampaignAck(
+        externalMessageId,
+        this.ackForStatus(status),
+      );
+    }
+  }
+
+  private ackForStatus(status: WhatsAppMessageStatus) {
+    if (status === WhatsAppMessageStatus.FAILED) return MessageAck.ACK_ERROR;
+    if (status === WhatsAppMessageStatus.DELIVERED)
+      return MessageAck.ACK_DEVICE;
+    if (status === WhatsAppMessageStatus.SENT) return MessageAck.ACK_SERVER;
+    return MessageAck.ACK_READ;
+  }
+
+  private async recordColdCampaignAck(
+    externalMessageId: string,
+    ack: MessageAck,
+  ) {
+    if (
+      ack !== MessageAck.ACK_ERROR &&
+      ack !== MessageAck.ACK_SERVER &&
+      ack !== MessageAck.ACK_DEVICE
+    ) {
+      return;
+    }
+    if (
+      typeof this.prisma.whatsAppMessage.findUnique !== 'function' ||
+      typeof this.prisma.campaignTarget?.findUnique !== 'function' ||
+      typeof this.prisma.campaignLog?.create !== 'function'
+    ) {
+      return;
+    }
+    const outbound = await this.prisma.whatsAppMessage.findUnique({
+      where: { externalMessageId },
+      select: { conversationId: true },
+    });
+    if (!outbound?.conversationId) return;
+    const target = await this.prisma.campaignTarget.findUnique({
+      where: { conversationId: outbound.conversationId },
+      select: { campaignId: true },
+    });
+    if (!target) return;
+
+    const event =
+      ack === MessageAck.ACK_ERROR
+        ? 'WHATSAPP_COLD_ACK_ERROR'
+        : 'WHATSAPP_COLD_ACK_SUCCESS';
+    await this.prisma.campaignLog.create({
+      data: {
+        campaignId: target.campaignId,
+        event,
+        message:
+          ack === MessageAck.ACK_ERROR
+            ? 'Cold outbound rejected by WhatsApp provider'
+            : 'Cold outbound acknowledged by WhatsApp provider',
+        metadata: { ack, externalMessageId },
+      },
+    });
+
+    if (ack !== MessageAck.ACK_ERROR) {
+      this.logger.log({
+        event: 'WHATSAPP_COLD_OUTBOUND_CIRCUIT_RESET',
+        campaignId: target.campaignId,
+        externalMessageId,
+        providerAck: ack,
+      });
+      return;
+    }
+
+    const recent = await this.prisma.campaignLog.findMany({
+      where: {
+        campaignId: target.campaignId,
+        event: {
+          in: ['WHATSAPP_COLD_ACK_ERROR', 'WHATSAPP_COLD_ACK_SUCCESS'],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 3,
+      select: { event: true },
+    });
+    if (
+      recent.length === 3 &&
+      recent.every((entry) => entry.event === 'WHATSAPP_COLD_ACK_ERROR')
+    ) {
+      const paused = await this.prisma.campaign.updateMany({
+        where: {
+          id: target.campaignId,
+          status: CampaignStatus.RUNNING,
+        },
+        data: { status: CampaignStatus.PAUSED },
+      });
+      if (paused.count > 0) {
+        this.logger.error({
+          event: 'WHATSAPP_COLD_OUTBOUND_CIRCUIT_OPENED',
+          campaignId: target.campaignId,
+          consecutiveAckErrors: 3,
+        });
+      }
     }
   }
 

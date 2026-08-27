@@ -150,6 +150,71 @@ describe('WhatsAppClientService ACK mapping', () => {
   });
 });
 
+describe('WhatsApp cold outbound ACK circuit', () => {
+  const createCircuitService = () => {
+    const events: string[] = [];
+    const campaignUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const prisma = {
+      whatsAppMessage: {
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        findUnique: jest.fn().mockResolvedValue({
+          conversationId: 'campaign-conversation',
+        }),
+      },
+      campaignTarget: {
+        findUnique: jest.fn().mockResolvedValue({ campaignId: 'campaign-1' }),
+      },
+      campaignLog: {
+        create: jest.fn(({ data }: { data: { event: string } }) => {
+          events.unshift(data.event);
+          return Promise.resolve({});
+        }),
+        findMany: jest.fn(() =>
+          Promise.resolve(events.slice(0, 3).map((event) => ({ event }))),
+        ),
+      },
+      campaign: { updateMany: campaignUpdateMany },
+    };
+    return {
+      service: new WhatsAppMessagingService(
+        prisma as never,
+        { onMessage: jest.fn(), onAck: jest.fn() } as never,
+        {} as never,
+      ),
+      events,
+      campaignUpdateMany,
+    };
+  };
+
+  const coldMessage = (id: string) =>
+    ({
+      id: { _serialized: id },
+      fromMe: true,
+      to: '77086810693@c.us',
+    }) as never;
+
+  it('pauses the affected campaign after three consecutive ACK_ERROR events', async () => {
+    const { service, campaignUpdateMany } = createCircuitService();
+    await service.handleAck(coldMessage('cold-1'), MessageAck.ACK_ERROR, 1);
+    await service.handleAck(coldMessage('cold-2'), MessageAck.ACK_ERROR, 1);
+    await service.handleAck(coldMessage('cold-3'), MessageAck.ACK_ERROR, 1);
+    expect(campaignUpdateMany).toHaveBeenCalledWith({
+      where: { id: 'campaign-1', status: 'RUNNING' },
+      data: { status: 'PAUSED' },
+    });
+  });
+
+  it('ACK_SERVER resets the consecutive ACK_ERROR sequence', async () => {
+    const { service, events, campaignUpdateMany } = createCircuitService();
+    await service.handleAck(coldMessage('cold-1'), MessageAck.ACK_ERROR, 1);
+    await service.handleAck(coldMessage('cold-2'), MessageAck.ACK_ERROR, 1);
+    await service.handleAck(coldMessage('cold-ok'), MessageAck.ACK_SERVER, 1);
+    await service.handleAck(coldMessage('cold-3'), MessageAck.ACK_ERROR, 1);
+    expect(events).toContain('WHATSAPP_COLD_ACK_SUCCESS');
+    expect(campaignUpdateMany).not.toHaveBeenCalled();
+  });
+});
+
 describe('WhatsAppMessagingService late ACK reconciliation', () => {
   it.each([
     [MessageAck.ACK_SERVER, WhatsAppMessageStatus.SENT],

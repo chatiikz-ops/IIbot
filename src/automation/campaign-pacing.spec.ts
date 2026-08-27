@@ -50,6 +50,7 @@ describe('Campaign first-message pacing', () => {
 
   function createHarness() {
     let lastSentAt: Date | null = null;
+    let lastAckErrorAt: Date | null = null;
     let leaderJobId: string | null = null;
     const sentAt: Date[] = [];
 
@@ -80,6 +81,11 @@ describe('Campaign first-message pacing', () => {
         count: jest.fn(async () => 0),
         findFirst: jest.fn(async () =>
           lastSentAt ? { messageSentAt: lastSentAt } : null,
+        ),
+      },
+      campaignLog: {
+        findFirst: jest.fn(async () =>
+          lastAckErrorAt ? { createdAt: lastAckErrorAt } : null,
         ),
       },
       $executeRaw: jest.fn(async () => 1),
@@ -119,6 +125,9 @@ describe('Campaign first-message pacing', () => {
       getLastSentAt: () => lastSentAt,
       setLastSentAt: (value: Date | null) => {
         lastSentAt = value;
+      },
+      setLastAckErrorAt: (value: Date | null) => {
+        lastAckErrorAt = value;
       },
       setLeaderJobId: (value: string | null) => {
         leaderJobId = value;
@@ -283,6 +292,17 @@ describe('Campaign first-message pacing', () => {
     ).resolves.toEqual(new Date(Date.now() + 300_000));
     expect(
       restarted.orchestrator.startConversationForCampaignTarget,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('applies a 300-second cold cooldown after ACK_ERROR', async () => {
+    const { worker, orchestrator, setLastAckErrorAt } = createHarness();
+    setLastAckErrorAt(new Date(Date.now()));
+    await expect(
+      worker.runCampaignTarget('target-2', 'job-2'),
+    ).resolves.toEqual(new Date(Date.now() + 300_000));
+    expect(
+      orchestrator.startConversationForCampaignTarget,
     ).not.toHaveBeenCalled();
   });
 

@@ -216,6 +216,12 @@ export class AutomationWorkerService
         WHERE ((candidate_job."status" = 'PENDING' AND candidate_job."runAt" <= NOW())
           OR (candidate_job."status" = 'PROCESSING' AND candidate_job."lockedAt" < NOW() - (${this.staleLockSeconds} * INTERVAL '1 second')))
           AND candidate_job."type" = ${type}::"AutomationJobType"
+          AND (${type}::"AutomationJobType" <> 'CAMPAIGN_TARGET'
+            OR EXISTS (
+              SELECT 1 FROM "Campaign" campaign
+              WHERE campaign."id" = candidate_job."campaignId"
+                AND campaign."status" = 'RUNNING'
+            ))
           AND (${type}::"AutomationJobType" <> 'CONVERSATION_REPLY'
             OR candidate_job."conversationId" IS NULL
             OR NOT EXISTS (
@@ -363,16 +369,21 @@ export class AutomationWorkerService
           : null,
       });
     } catch (error) {
+      const temporaryWhatsAppUnavailable =
+        job.type === AutomationJobType.CAMPAIGN_TARGET &&
+        this.isPreSendWhatsAppUnavailable(error);
       const terminalCancellation =
         error instanceof AutomationJobError && error.kind === 'TERMINAL';
       const terminalFailure = this.isTerminalFailure(error);
       const exhausted = job.attempts >= job.maxAttempts;
 
-      const status = terminalCancellation
-        ? AutomationJobStatus.CANCELLED
-        : terminalFailure || exhausted
-          ? AutomationJobStatus.FAILED
-          : AutomationJobStatus.PENDING;
+      const status = temporaryWhatsAppUnavailable
+        ? AutomationJobStatus.PENDING
+        : terminalCancellation
+          ? AutomationJobStatus.CANCELLED
+          : terminalFailure || exhausted
+            ? AutomationJobStatus.FAILED
+            : AutomationJobStatus.PENDING;
 
       const backoff = job.attempts <= 1 ? 15_000 : 60_000;
 
@@ -417,8 +428,14 @@ export class AutomationWorkerService
           status,
           runAt:
             status === AutomationJobStatus.PENDING
-              ? new Date(Date.now() + backoff)
+              ? new Date(
+                  Date.now() +
+                    (temporaryWhatsAppUnavailable ? 45_000 : backoff),
+                )
               : undefined,
+          ...(temporaryWhatsAppUnavailable
+            ? { attempts: { decrement: 1 } }
+            : {}),
           lockedAt: null,
           lockedBy: null,
           lastError: this.errorMessage(error).slice(0, 1000),
@@ -428,17 +445,30 @@ export class AutomationWorkerService
         },
       });
 
-      this.logger.warn({
-        event:
-          job.type === AutomationJobType.CAMPAIGN_TARGET
-            ? 'CAMPAIGN_TARGET_FAILED'
-            : 'AUTOMATION_JOB_FAILED',
-        jobId: job.id,
-        campaignId: job.campaignId,
-        type: job.type,
-        attempts: job.attempts,
-        status,
-      });
+      if (temporaryWhatsAppUnavailable) {
+        this.logger.warn({
+          event: 'CAMPAIGN_JOB_DEFERRED_WHATSAPP_UNAVAILABLE',
+          jobId: job.id,
+          campaignId: job.campaignId,
+          targetId: job.campaignTargetId,
+          errorCode: this.errorCode(error),
+          runAtDelayMs: 45_000,
+        });
+      }
+
+      if (!temporaryWhatsAppUnavailable) {
+        this.logger.warn({
+          event:
+            job.type === AutomationJobType.CAMPAIGN_TARGET
+              ? 'CAMPAIGN_TARGET_FAILED'
+              : 'AUTOMATION_JOB_FAILED',
+          jobId: job.id,
+          campaignId: job.campaignId,
+          type: job.type,
+          attempts: job.attempts,
+          status,
+        });
+      }
     }
   }
 
@@ -464,11 +494,20 @@ export class AutomationWorkerService
         }
 
         if (target.campaign.status === CampaignStatus.PAUSED) {
+          this.logger.log({
+            event: 'CAMPAIGN_PAUSED_JOB_DEFERRED',
+            campaignId: target.campaignId,
+            targetId,
+          });
           return new Date(Date.now() + this.pollMs);
         }
 
         if (target.campaign.status !== CampaignStatus.RUNNING) {
-          return null;
+          throw new AutomationJobError(
+            'CAMPAIGN_NOT_RUNNING',
+            'TERMINAL',
+            `Campaign is ${target.campaign.status}`,
+          );
         }
 
         // Global lock for cold campaign pacing.
@@ -555,6 +594,22 @@ export class AutomationWorkerService
           }
         }
 
+        const lastAckError =
+          typeof tx.campaignLog?.findFirst === 'function'
+            ? await tx.campaignLog.findFirst({
+                where: { event: 'WHATSAPP_COLD_ACK_ERROR' },
+                orderBy: { createdAt: 'desc' },
+                select: { createdAt: true },
+              })
+            : null;
+        if (lastAckError) {
+          const allowedAt = new Date(
+            lastAckError.createdAt.getTime() +
+              this.firstCampaignMessageIntervalMs,
+          );
+          if (allowedAt.getTime() > Date.now()) return allowedAt;
+        }
+
         return null;
       },
       {
@@ -639,6 +694,16 @@ export class AutomationWorkerService
     return this.findCodedError(error)?.retryable === false;
   }
 
+  private isPreSendWhatsAppUnavailable(error: unknown) {
+    const code = this.findCodedError(error)?.code;
+    return [
+      'WHATSAPP_NOT_CONNECTED',
+      'WHATSAPP_INITIALIZING',
+      'WHATSAPP_RUNTIME_STABILIZING',
+      'WHATSAPP_RUNTIME_UNHEALTHY',
+    ].includes(code ?? '');
+  }
+
   private findCodedError(
     error: unknown,
   ): { code: string; retryable?: boolean } | null {
@@ -657,6 +722,7 @@ export class AutomationWorkerService
         code?: unknown;
         retryable?: unknown;
         cause?: unknown;
+        response?: unknown;
       };
       if (typeof candidate.code === 'string') {
         return {
@@ -667,7 +733,7 @@ export class AutomationWorkerService
               : undefined,
         };
       }
-      current = candidate.cause;
+      current = candidate.cause ?? candidate.response;
     }
     return null;
   }
