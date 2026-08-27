@@ -10,7 +10,12 @@ import { WhatsAppClientService } from './whatsapp-client.service';
 
 class FakeClient extends EventEmitter {
   initialize = jest.fn<Promise<void>, []>();
-  destroy = jest.fn(() => Promise.resolve(undefined));
+  private pageClosed = false;
+  destroy = jest.fn(() => {
+    this.pageClosed = true;
+    this.pupBrowser.isConnected.mockReturnValue(false);
+    return Promise.resolve(undefined);
+  });
   logout = jest.fn(() => Promise.resolve(undefined));
   isRegisteredUser = jest.fn(() => Promise.resolve(true));
   sendMessage = jest.fn(() => Promise.resolve({ id: 'sent' }));
@@ -23,8 +28,21 @@ class FakeClient extends EventEmitter {
     ]),
   );
   pupBrowser = {
-    isConnected: jest.fn(() => false),
-    close: jest.fn(() => Promise.resolve()),
+    isConnected: jest.fn(() => true),
+    close: jest.fn(() => {
+      this.pupBrowser.isConnected.mockReturnValue(false);
+      return Promise.resolve();
+    }),
+    once: jest.fn(),
+  };
+  pupPage = {
+    isClosed: jest.fn(() => this.pageClosed),
+    close: jest.fn(() => {
+      this.pageClosed = true;
+      return Promise.resolve();
+    }),
+    url: jest.fn(() => 'https://web.whatsapp.com/'),
+    once: jest.fn(),
   };
   info = { wid: { user: '77001234567' }, pushname: 'Test' };
 }
@@ -35,6 +53,12 @@ type Internals = {
   generation: number;
   client: FakeClient | null;
   authStrategy: { logout: jest.Mock<Promise<void>, []> } | null;
+  recoveryPromise: Promise<void> | null;
+  markRuntimeUnhealthy(
+    client: FakeClient,
+    generation: number,
+    error: Error,
+  ): void;
   acquireRuntimeLock(): void;
   releaseRuntimeLock(): void;
   withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T>;
@@ -467,7 +491,7 @@ describe('WhatsAppClientService lifecycle', () => {
     ).resolves.toEqual({ id: 'sent' });
   });
 
-  it('surfaces a send transport failure even while FSM is CONNECTED', async () => {
+  it('leaves CONNECTED after a fatal send transport failure', async () => {
     const operation = service.initialize();
     await ready();
     await operation;
@@ -479,9 +503,103 @@ describe('WhatsAppClientService lifecycle', () => {
       'Execution context was destroyed',
     );
     await expect(service.getStatus()).resolves.toMatchObject({
+      connected: false,
+    });
+    await tick();
+    expect(clients).toHaveLength(2);
+    await ready(clients[1]);
+    await (service as unknown as Internals).recoveryPromise;
+    await expect(service.getStatus()).resolves.toMatchObject({
       state: 'CONNECTED',
       connected: true,
     });
+  });
+
+  it('rejects outbound and recovers when CONNECTED page is closed', async () => {
+    const operation = service.initialize();
+    await ready();
+    await operation;
+    clients[0].pupPage.isClosed.mockReturnValue(true);
+
+    await expect(
+      service.sendText('77001234567@c.us', 'hello'),
+    ).rejects.toMatchObject({ code: 'WHATSAPP_RUNTIME_UNHEALTHY' });
+    await expect(service.getStatus()).resolves.toMatchObject({
+      connected: false,
+    });
+    await tick();
+    await ready(clients[1]);
+    await (service as unknown as Internals).recoveryPromise;
+    expect(clients).toHaveLength(2);
+  });
+
+  it('rejects outbound and recovers when browser is disconnected', async () => {
+    const operation = service.initialize();
+    await ready();
+    await operation;
+    clients[0].pupBrowser.isConnected.mockReturnValue(false);
+
+    await expect(
+      service.sendText('77001234567@c.us', 'hello'),
+    ).rejects.toMatchObject({ code: 'WHATSAPP_RUNTIME_UNHEALTHY' });
+    await tick();
+    await ready(clients[1]);
+    await (service as unknown as Internals).recoveryPromise;
+    await expect(service.getStatus()).resolves.toMatchObject({
+      state: 'CONNECTED',
+    });
+  });
+
+  it('TargetCloseError starts one recovery and blocks outbound meanwhile', async () => {
+    const operation = service.initialize();
+    await ready();
+    await operation;
+    const targetClosed = Object.assign(
+      new Error('Protocol error: Target closed'),
+      {
+        name: 'TargetCloseError',
+      },
+    );
+    clients[0].sendMessage.mockRejectedValueOnce(targetClosed);
+
+    await expect(service.sendText('77001234567@c.us', 'hello')).rejects.toBe(
+      targetClosed,
+    );
+    await expect(
+      service.sendText('77001234567@c.us', 'blocked'),
+    ).rejects.toMatchObject({
+      // Jest's asymmetric matcher is intentionally dynamic at this boundary.
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      response: expect.objectContaining({ code: 'WHATSAPP_NOT_CONNECTED' }),
+    });
+    await tick();
+    expect(clients).toHaveLength(2);
+    await ready(clients[1]);
+    await (service as unknown as Internals).recoveryPromise;
+    expect(clients[0].destroy).toHaveBeenCalledTimes(1);
+    expect(clients[1].destroy).not.toHaveBeenCalled();
+  });
+
+  it('ignores runtime-fatal notifications from a stale browser generation', async () => {
+    const initial = service.initialize();
+    await ready();
+    await initial;
+    const oldClient = clients[0];
+    const reconnect = service.reconnect();
+    await tick();
+    await ready(clients[1]);
+    await reconnect;
+
+    (service as unknown as Internals).markRuntimeUnhealthy(
+      oldClient,
+      1,
+      new Error('Target closed'),
+    );
+    await expect(service.getStatus()).resolves.toMatchObject({
+      state: 'CONNECTED',
+      generation: 2,
+    });
+    expect(clients).toHaveLength(2);
   });
 
   it('does not hide a provider result from a stale client generation', async () => {

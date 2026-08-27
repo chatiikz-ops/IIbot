@@ -34,6 +34,20 @@ export type WhatsAppRuntimeState =
 type InitializationOutcome =
   'CONNECTED' | 'QR_REQUIRED' | 'ERROR' | 'CANCELLED';
 
+export class WhatsAppRuntimeError extends Error {
+  readonly code = 'WHATSAPP_RUNTIME_UNHEALTHY';
+  readonly retryable = true;
+
+  constructor(
+    message: string,
+    readonly outcomeAmbiguous: boolean,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'WhatsAppRuntimeError';
+  }
+}
+
 @Injectable()
 export class WhatsAppClientService
   implements OnModuleInit, OnApplicationShutdown
@@ -61,6 +75,8 @@ export class WhatsAppClientService
   private readonly boundClients = new WeakSet<Client>();
   private eventQueue: Promise<void> = Promise.resolve();
   private ownsRuntimeLock = false;
+  private recoveryPromise: Promise<void> | null = null;
+  private readonly healthBoundClients = new WeakSet<Client>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -312,6 +328,16 @@ export class WhatsAppClientService
     this.ensureConnected();
     const client = this.client!;
     const generation = this.generation;
+    const health = this.runtimeHealth(client, generation);
+    this.logger.log({ event: 'WHATSAPP_RUNTIME_HEALTH', ...health });
+    if (!health.browserConnected || health.pageClosed) {
+      const error = new WhatsAppRuntimeError(
+        'WhatsApp Chromium runtime is not healthy before sendMessage',
+        false,
+      );
+      this.markRuntimeUnhealthy(client, generation, error, health);
+      throw error;
+    }
     try {
       const result = await client.sendMessage(chatId, text);
       const candidate = result as WebMessage | null | undefined;
@@ -352,6 +378,9 @@ export class WhatsAppClientService
           error instanceof Error ? (error.stack?.slice(0, 8000) ?? null) : null,
         errorCause: this.safeErrorValue(cause),
       });
+      if (this.isRuntimeFatalError(error)) {
+        this.markRuntimeUnhealthy(client, generation, error);
+      }
       throw error;
     }
   }
@@ -835,6 +864,20 @@ export class WhatsAppClientService
 
   private async handleReady(client: Client, generation: number) {
     if (this.state === 'CONNECTED') return;
+    this.bindRuntimeHealthEvents(client, generation);
+    const health = this.runtimeHealth(client, generation);
+    if (!health.browserConnected || health.pageClosed) {
+      this.markRuntimeUnhealthy(
+        client,
+        generation,
+        new WhatsAppRuntimeError(
+          'WhatsApp Chromium became unhealthy before ready completed',
+          false,
+        ),
+        health,
+      );
+      return;
+    }
     this.clearQr();
     const lastConnectedAt = new Date();
     const phoneNumber = client.info?.wid?.user
@@ -848,6 +891,158 @@ export class WhatsAppClientService
     });
     this.resolveInitialization(generation, 'CONNECTED');
     this.logLifecycle('WHATSAPP_READY', generation);
+  }
+
+  private bindRuntimeHealthEvents(client: Client, generation: number) {
+    if (this.healthBoundClients.has(client)) return;
+    this.healthBoundClients.add(client);
+    client.pupBrowser?.once('disconnected', () => {
+      this.logger.error({
+        event: 'WHATSAPP_BROWSER_DISCONNECTED',
+        generation,
+      });
+      void this.markRuntimeUnhealthy(
+        client,
+        generation,
+        new WhatsAppRuntimeError('Chromium browser disconnected', false),
+      );
+    });
+    client.pupPage?.once('close', () => {
+      this.logger.error({ event: 'WHATSAPP_PAGE_CLOSED', generation });
+      void this.markRuntimeUnhealthy(
+        client,
+        generation,
+        new WhatsAppRuntimeError('WhatsApp Web page closed', false),
+      );
+    });
+    client.pupPage?.once('error', (error) => {
+      void this.markRuntimeUnhealthy(client, generation, error);
+    });
+    client.pupPage?.once('framenavigated', () => {
+      if (this.state !== 'CONNECTED') return;
+      void this.markRuntimeUnhealthy(
+        client,
+        generation,
+        new WhatsAppRuntimeError(
+          'WhatsApp Web navigated after runtime became connected',
+          false,
+        ),
+      );
+    });
+  }
+
+  private runtimeHealth(client: Client, generation: number) {
+    const page = client.pupPage;
+    const pageClosed = !page || page.isClosed();
+    const browserConnected = Boolean(client.pupBrowser?.isConnected());
+    let pageUrl: string | null = null;
+    if (!pageClosed) {
+      try {
+        pageUrl = page?.url() ?? null;
+      } catch {
+        pageUrl = null;
+      }
+    }
+    return {
+      browserConnected,
+      pageClosed,
+      pageUrl,
+      clientGeneration: generation,
+      state: this.state,
+    };
+  }
+
+  private markRuntimeUnhealthy(
+    client: Client,
+    generation: number,
+    error: unknown,
+    health = this.runtimeHealth(client, generation),
+  ) {
+    if (
+      this.client !== client ||
+      this.generation !== generation ||
+      this.state === 'DISCONNECTING' ||
+      this.state === 'LOGGING_OUT'
+    ) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.toLowerCase().includes('execution context was destroyed')) {
+      this.logger.error({
+        event: 'WHATSAPP_EXECUTION_CONTEXT_DESTROYED',
+        generation,
+      });
+    }
+    this.logger.error({
+      event: 'WHATSAPP_RUNTIME_UNHEALTHY',
+      ...health,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      errorMessage: message,
+    });
+    if (this.recoveryPromise) return;
+
+    const previousState = this.state;
+    this.state = 'ERROR';
+    this.logger.log({
+      event: 'WHATSAPP_STATE_CHANGED',
+      generation: this.generation,
+      previousState,
+      nextState: 'ERROR',
+    });
+    const recovery = (async () => {
+      await this.persistState('ERROR', {
+        lastError: `WhatsApp Chromium runtime unhealthy: ${message}`.slice(
+          0,
+          1000,
+        ),
+      });
+      this.logger.warn({
+        event: 'WHATSAPP_RUNTIME_RECOVERY_STARTED',
+        generation,
+      });
+      try {
+        await this.reconnect();
+        if (this.state !== 'CONNECTED') {
+          throw new Error(`Recovery completed with state=${this.state}`);
+        }
+        this.logger.log({
+          event: 'WHATSAPP_RUNTIME_RECOVERY_COMPLETED',
+          generation: this.generation,
+        });
+      } catch (recoveryError) {
+        this.state = 'ERROR';
+        this.logger.error({
+          event: 'WHATSAPP_RUNTIME_RECOVERY_FAILED',
+          generation,
+          errorName:
+            recoveryError instanceof Error
+              ? recoveryError.name
+              : 'UnknownError',
+          errorMessage:
+            recoveryError instanceof Error
+              ? recoveryError.message
+              : String(recoveryError),
+        });
+      }
+    })();
+    const trackedRecovery = recovery.finally(() => {
+      if (this.recoveryPromise === trackedRecovery) {
+        this.recoveryPromise = null;
+      }
+    });
+    this.recoveryPromise = trackedRecovery;
+  }
+
+  private isRuntimeFatalError(error: unknown) {
+    if (!(error instanceof Error)) return false;
+    const value = `${error.name} ${error.message}`.toLowerCase();
+    return [
+      'targetcloseerror',
+      'target closed',
+      'execution context was destroyed',
+      'protocol error (runtime.evaluate)',
+      'session closed',
+    ].some((pattern) => value.includes(pattern));
   }
 
   private async handleAuthenticated(client: Client, generation: number) {

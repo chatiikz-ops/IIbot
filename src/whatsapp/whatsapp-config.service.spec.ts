@@ -1,6 +1,7 @@
 import { WhatsAppConfigService } from './whatsapp-config.service';
 
 describe('WhatsAppConfigService browser launch config', () => {
+  const productionArgs = ['--disable-dev-shm-usage'];
   const originalExecutablePath = process.env.WHATSAPP_CHROME_EXECUTABLE_PATH;
   const originalHeadless = process.env.WHATSAPP_HEADLESS;
 
@@ -23,7 +24,7 @@ describe('WhatsAppConfigService browser launch config', () => {
 
     expect(new WhatsAppConfigService().browserLaunchOptions).toEqual({
       headless: true,
-      args: [],
+      args: productionArgs,
     });
   });
 
@@ -34,7 +35,7 @@ describe('WhatsAppConfigService browser launch config', () => {
     expect(new WhatsAppConfigService().browserLaunchOptions).toEqual({
       headless: false,
       executablePath: process.execPath,
-      args: [],
+      args: productionArgs,
     });
   });
 

@@ -58,7 +58,7 @@ export class WhatsAppConfigService {
       ...(this.chromeExecutablePath
         ? { executablePath: this.chromeExecutablePath }
         : {}),
-      args: [] as string[],
+      args: ['--disable-dev-shm-usage'],
     };
   }
 
