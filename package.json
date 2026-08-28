@@ -22,6 +22,7 @@
     "test:e2e": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config ./test/jest-e2e.json",
     "admin:create-owner": "npm run build && node dist/create-owner.js",
     "admin:reset-password": "npm run build && node dist/reset-admin-password.js",
+    "whatsapp:canary": "npm run build && node dist/whatsapp-canary.js",
     "postinstall": "prisma generate"
   },
   "dependencies": {

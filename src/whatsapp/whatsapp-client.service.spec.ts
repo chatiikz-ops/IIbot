@@ -12,15 +12,19 @@ class FakeClient extends EventEmitter {
   private readonly mainFrameToken = {};
   initialize = jest.fn<Promise<void>, []>();
   private pageClosed = false;
-  destroy = jest.fn(() => {
+  destroy = jest.fn<Promise<void>, []>(() => {
     this.pageClosed = true;
     this.pupBrowser.isConnected.mockReturnValue(false);
     return Promise.resolve(undefined);
   });
   logout = jest.fn(() => Promise.resolve(undefined));
   isRegisteredUser = jest.fn(() => Promise.resolve(true));
+  getNumberId = jest.fn((id: string) => Promise.resolve({ _serialized: id }));
   getState = jest.fn(() => Promise.resolve('CONNECTED'));
-  sendMessage = jest.fn(() => Promise.resolve({ id: 'sent' }));
+  sendMessage = jest.fn<
+    Promise<{ id: string } | { id: { _serialized: string } }>,
+    [string, string]
+  >(() => Promise.resolve({ id: 'sent' }));
   getContactLidAndPhone = jest.fn(() =>
     Promise.resolve([
       {
@@ -226,7 +230,6 @@ describe('WhatsAppClientService lifecycle', () => {
     await expect(service.getStatus()).resolves.toMatchObject({
       state: 'CONNECTED',
       connected: true,
-      state: 'CONNECTED',
       phoneNumber: '+77001234567',
       displayName: 'Test',
       qrAvailable: false,
@@ -245,7 +248,6 @@ describe('WhatsAppClientService lifecycle', () => {
     await expect(service.getStatus()).resolves.toMatchObject({
       state: 'CONNECTED',
       connected: true,
-      state: 'CONNECTED',
     });
     expect(session.status).toBe(WhatsAppConnectionStatus.CONNECTED);
   });
@@ -580,6 +582,43 @@ describe('WhatsAppClientService lifecycle', () => {
     ).resolves.toEqual({ id: 'sent' });
   });
 
+  it.each([
+    ['77001234567@c.us', 'c.us'],
+    ['53296299557012@lid', 'lid'],
+  ] as const)(
+    'uses canonical getNumberId result %s',
+    async (canonical, domain) => {
+      const operation = service.initialize();
+      await ready();
+      await operation;
+      clients[0].getNumberId.mockResolvedValueOnce({ _serialized: canonical });
+
+      await expect(
+        service.resolveRecipient('77001234567@c.us'),
+      ).resolves.toMatchObject({
+        canonicalChatId: canonical,
+        canonicalDomain: domain,
+        registered: true,
+        resolutionSource: 'getNumberId',
+      });
+    },
+  );
+
+  it('treats a null getNumberId result as not registered', async () => {
+    const operation = service.initialize();
+    await ready();
+    await operation;
+    clients[0].getNumberId.mockResolvedValueOnce(null as never);
+
+    await expect(
+      service.resolveRecipient('77001234567@c.us'),
+    ).resolves.toMatchObject({
+      canonicalChatId: null,
+      canonicalDomain: 'unknown',
+      registered: false,
+    });
+  });
+
   it('coalesces navigation events and recovers once if runtime stays unhealthy', async () => {
     const operation = service.initialize();
     await ready();
@@ -731,8 +770,9 @@ describe('WhatsAppClientService lifecycle', () => {
     const operation = service.initialize();
     await ready();
     await operation;
-    let resolveSend: ((value: { id: { _serialized: string } }) => void) | null =
-      null;
+    type SendValue = { id: string } | { id: { _serialized: string } };
+    let resolveSend: (value: SendValue | PromiseLike<SendValue>) => void = () =>
+      undefined;
     clients[0].sendMessage.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
@@ -741,7 +781,7 @@ describe('WhatsAppClientService lifecycle', () => {
     );
     const send = service.sendText('77001234567@c.us', 'hello');
     (service as unknown as Internals).generation = 2;
-    resolveSend?.({ id: { _serialized: 'provider-stale-generation' } });
+    resolveSend({ id: { _serialized: 'provider-stale-generation' } });
 
     await expect(send).resolves.toMatchObject({
       id: { _serialized: 'provider-stale-generation' },

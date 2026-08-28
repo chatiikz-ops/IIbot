@@ -1,6 +1,15 @@
 import type { Message as WebMessage } from 'whatsapp-web.js';
 
 export const WHATSAPP_TRANSPORT = Symbol('WHATSAPP_TRANSPORT');
+export function createWhatsAppTransportProviders<T, U>(
+  transport: string | undefined,
+  webjsProvider: T,
+  wppconnectProvider: U,
+) {
+  const selected =
+    transport?.trim() === 'wppconnect' ? wppconnectProvider : webjsProvider;
+  return [selected, { provide: WHATSAPP_TRANSPORT, useExisting: selected }];
+}
 export function selectWhatsAppTransport<T, U>(
   transport: string,
   webjs: T,
@@ -10,6 +19,14 @@ export function selectWhatsAppTransport<T, U>(
 }
 export type WhatsAppTransportName = 'whatsapp-webjs' | 'wppconnect';
 export type TransportMessage = WebMessage;
+export type WhatsAppRecipientDomain = 'c.us' | 'lid' | 'unknown';
+export type ResolvedWhatsAppRecipient = {
+  candidateChatId: string;
+  canonicalChatId: string | null;
+  canonicalDomain: WhatsAppRecipientDomain;
+  registered: boolean;
+  resolutionSource: 'getNumberId' | 'provider' | 'fallback';
+};
 export type WhatsAppTransportState =
   | 'DISABLED'
   | 'IDLE'
@@ -39,6 +56,7 @@ export interface WhatsAppTransport {
     chatId: string,
     text: string,
   ): Promise<TransportMessage | null | undefined>;
+  resolveRecipient(chatId: string): Promise<ResolvedWhatsAppRecipient>;
   isRegisteredUser(chatId: string): Promise<boolean>;
   resolveLidIdentity(lid: string): Promise<{
     lid: string;

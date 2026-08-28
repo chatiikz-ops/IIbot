@@ -217,6 +217,7 @@ enum CampaignTargetStatus {
   PROCESSING
   MESSAGE_SENT
   WAITING_REPLY
+  RECONCILIATION_REQUIRED
   REPLIED
   LEAD
   HANDOFF
@@ -640,6 +641,7 @@ model WhatsAppSession {
 
 model WhatsAppMessage {
   id                String                   @id @default(uuid())
+  correlationId     String?                  @unique
   externalMessageId String?                  @unique
   direction         WhatsAppMessageDirection
   status            WhatsAppMessageStatus

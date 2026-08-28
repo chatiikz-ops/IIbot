@@ -86,7 +86,8 @@ describe('Campaign conversation ownership', () => {
           }) => {
             const conversation = {
               id: `conversation-b-${sequence++}`,
-              ...query.data,
+              contactId: query.data.contactId,
+              strategyCode: query.data.strategyCode ?? 'MANUAL_WHATSAPP',
               messages: [],
             };
             conversations.set(conversation.id, conversation);

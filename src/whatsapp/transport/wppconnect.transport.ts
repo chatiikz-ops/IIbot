@@ -224,6 +224,28 @@ export class WppConnectTransport
     return Boolean(result?.canReceiveMessage);
   }
 
+  async resolveRecipient(chatId: string) {
+    this.ensureConnected();
+    const result = await this.client!.checkNumberStatus(chatId);
+    const serialized = result?.id?._serialized;
+    const canonicalChatId =
+      typeof serialized === 'string' &&
+      /^\d{7,20}@(c\.us|lid)$/.test(serialized)
+        ? serialized
+        : null;
+    return {
+      candidateChatId: chatId,
+      canonicalChatId,
+      canonicalDomain: canonicalChatId?.endsWith('@lid')
+        ? ('lid' as const)
+        : canonicalChatId?.endsWith('@c.us')
+          ? ('c.us' as const)
+          : ('unknown' as const),
+      registered: Boolean(result?.canReceiveMessage && canonicalChatId),
+      resolutionSource: 'provider' as const,
+    };
+  }
+
   async resolveLidIdentity(lid: string) {
     if (!lid.endsWith('@lid') || !this.client) return null;
     const entry = await this.client.getPnLidEntry(lid);

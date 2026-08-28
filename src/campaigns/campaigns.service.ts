@@ -49,6 +49,7 @@ const PROCESSED_TARGET_STATUSES = new Set<CampaignTargetStatus>([
   CampaignTargetStatus.HANDOFF,
   CampaignTargetStatus.REJECTED,
   CampaignTargetStatus.ERROR,
+  CampaignTargetStatus.RECONCILIATION_REQUIRED,
   CampaignTargetStatus.SKIPPED,
 ]);
 const REPLIED_TARGET_STATUSES = new Set<CampaignTargetStatus>([
@@ -693,7 +694,8 @@ export class CampaignsService {
         data: {
           status: nextStatus,
           errorMessage:
-            nextStatus === CampaignTargetStatus.ERROR
+            nextStatus === CampaignTargetStatus.ERROR ||
+            nextStatus === CampaignTargetStatus.RECONCILIATION_REQUIRED
               ? data.errorMessage
               : null,
           ...(nextStatus === CampaignTargetStatus.QUEUED

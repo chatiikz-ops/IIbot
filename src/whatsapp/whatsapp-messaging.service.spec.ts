@@ -17,9 +17,9 @@ describe('WhatsAppMessagingService acknowledgements', () => {
     };
     data: { status: WhatsAppMessageStatus; errorMessage?: string };
   };
-  const updateMany = jest.fn<
-    (args: UpdateManyArgs) => Promise<{ count: number }>
-  >(() => Promise.resolve({ count: 1 }));
+  const updateMany = jest.fn<Promise<{ count: number }>, [UpdateManyArgs]>(() =>
+    Promise.resolve({ count: 1 }),
+  );
   const client = { onMessage: jest.fn(), onAck: jest.fn() };
   const service = new WhatsAppMessagingService(
     { whatsAppMessage: { updateMany } } as never,
@@ -162,7 +162,12 @@ describe('WhatsApp cold outbound ACK circuit', () => {
         }),
       },
       campaignTarget: {
-        findUnique: jest.fn().mockResolvedValue({ campaignId: 'campaign-1' }),
+        findUnique: jest.fn().mockResolvedValue({
+          id: 'target-1',
+          campaignId: 'campaign-1',
+          status: 'WAITING_REPLY',
+        }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       campaignLog: {
         create: jest.fn(({ data }: { data: { event: string } }) => {
@@ -296,6 +301,13 @@ describe('WhatsAppMessagingService outbound idempotency', () => {
       onMessage: jest.fn(),
       onAck: jest.fn(),
       getGeneration: jest.fn(() => 4),
+      resolveRecipient: jest.fn().mockResolvedValue({
+        candidateChatId: '77086810693@c.us',
+        canonicalChatId: '77086810693@c.us',
+        canonicalDomain: 'c.us',
+        registered: true,
+        resolutionSource: 'getNumberId',
+      }),
       isRegisteredUser: jest.fn().mockResolvedValue(true),
       sendText: jest.fn().mockResolvedValue({
         id: { _serialized: 'true_77086810693@c.us_REAL' },
@@ -356,6 +368,13 @@ describe('WhatsAppMessagingService outbound idempotency', () => {
     const client = {
       onMessage: jest.fn(),
       onAck: jest.fn(),
+      resolveRecipient: jest.fn().mockResolvedValue({
+        candidateChatId: '77086810693@c.us',
+        canonicalChatId: '77086810693@c.us',
+        canonicalDomain: 'c.us',
+        registered: true,
+        resolutionSource: 'getNumberId',
+      }),
       isRegisteredUser: jest.fn(() => Promise.resolve(true)),
       sendText: jest.fn(() =>
         Promise.reject(new TypeError('provider post-send failure')),
@@ -388,7 +407,9 @@ describe('WhatsAppMessagingService outbound idempotency', () => {
     });
 
     expect(client.sendText).toHaveBeenCalledTimes(1);
-    expect(stored?.errorMessage).toContain('provider post-send failure');
+    expect(
+      (stored as unknown as typeof outbound | null)?.errorMessage,
+    ).toContain('provider post-send failure');
   });
 
   it('marks a provider result without an ID as OUTCOME_UNKNOWN', async () => {
@@ -416,6 +437,13 @@ describe('WhatsAppMessagingService outbound idempotency', () => {
     const client = {
       onMessage: jest.fn(),
       onAck: jest.fn(),
+      resolveRecipient: jest.fn().mockResolvedValue({
+        candidateChatId: '77086810693@c.us',
+        canonicalChatId: '77086810693@c.us',
+        canonicalDomain: 'c.us',
+        registered: true,
+        resolutionSource: 'getNumberId',
+      }),
       isRegisteredUser: jest.fn().mockResolvedValue(true),
       sendText: jest.fn().mockResolvedValue(undefined),
     };
@@ -488,6 +516,13 @@ describe('WhatsAppMessagingService outbound idempotency', () => {
         },
       ),
       getGeneration: jest.fn(() => 7),
+      resolveRecipient: jest.fn().mockResolvedValue({
+        candidateChatId: '77086810693@c.us',
+        canonicalChatId: '53296299557012@lid',
+        canonicalDomain: 'lid',
+        registered: true,
+        resolutionSource: 'getNumberId',
+      }),
       isRegisteredUser: jest.fn().mockResolvedValue(true),
       sendText: jest.fn(async () => {
         await messageCreateHandler?.(

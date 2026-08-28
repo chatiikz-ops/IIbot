@@ -29,6 +29,7 @@ import {
 import { TelegramNotificationsService } from '../telegram/telegram-notifications.service';
 import {
   WhatsAppMessagingService,
+  WhatsAppPreSubmitError,
   type KnownInboundMessage,
 } from '../whatsapp/whatsapp-messaging.service';
 import { AutomationDelayService } from './automation-delay.service';
@@ -328,6 +329,44 @@ export class ConversationOrchestratorService {
         phone: target.contact.phone,
         text: aiMessage.text,
       });
+      if (sent.outcome === 'OUTCOME_UNKNOWN') {
+        await this.campaigns.updateTargetStatus(target.campaignId, target.id, {
+          status: CampaignTargetStatus.RECONCILIATION_REQUIRED,
+          errorMessage:
+            'WhatsApp submission outcome is unknown; manual reconciliation required',
+        });
+        this.logger.warn({
+          event: 'WHATSAPP_CAMPAIGN_RECONCILIATION_REQUIRED',
+          campaignId: target.campaignId,
+          targetId: target.id,
+          conversationId: conversation.id,
+          whatsAppMessageId: sent.whatsappMessage.id,
+          jobId: automationJobId,
+        });
+        await this.events.create({
+          type: AutomationEventType.WHATSAPP_FAILED,
+          contactId: target.contactId,
+          conversationId: conversation.id,
+          messageId: aiMessage.id,
+          aiRunId,
+          whatsAppMessageId: sent.whatsappMessage.id,
+          reason: 'WHATSAPP_OUTCOME_UNKNOWN',
+          metadata: { flow: 'CAMPAIGN_FIRST_MESSAGE', reconciliation: true },
+        });
+        return {
+          conversationId: conversation.id,
+          messageId: aiMessage.id,
+          whatsAppMessageId: sent.whatsappMessage.id,
+          targetStatus: CampaignTargetStatus.RECONCILIATION_REQUIRED,
+          alreadySent: sent.alreadySent,
+        };
+      }
+      if (sent.outcome !== 'SUBMITTED' || !sent.whatsappMessage.sentAt) {
+        throw new WhatsAppPreSubmitError(
+          'WHATSAPP_SUBMISSION_NOT_CONFIRMED',
+          'WhatsApp provider submission was not confirmed',
+        );
+      }
       await this.campaigns.updateTargetStatus(target.campaignId, target.id, {
         status: CampaignTargetStatus.WAITING_REPLY,
       });
@@ -359,6 +398,9 @@ export class ConversationOrchestratorService {
         alreadySent: sent.alreadySent,
       };
     } catch (error) {
+      if (error instanceof WhatsAppPreSubmitError) {
+        throw error;
+      }
       await this.campaigns.updateTargetStatus(target.campaignId, target.id, {
         status: CampaignTargetStatus.ERROR,
         errorMessage: 'WhatsApp send failed',

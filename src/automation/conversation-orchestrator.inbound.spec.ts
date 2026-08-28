@@ -163,8 +163,10 @@ describe('ConversationOrchestrator inbound replies', () => {
       },
     ]);
     whatsapp.sendAiMessage.mockResolvedValue({
-      whatsappMessage: { id: 'wa-outbound-2' },
+      whatsappMessage: { id: 'wa-outbound-2', sentAt: new Date() },
       alreadySent: false,
+      outcome: 'SUBMITTED',
+      outcomePending: false,
     });
   });
 
@@ -361,8 +363,9 @@ describe('ConversationOrchestrator inbound replies', () => {
       message: { id: 'message-b', text: 'Campaign B message' },
     });
     whatsapp.sendAiMessage.mockResolvedValueOnce({
-      whatsappMessage: { id: 'wa-b' },
+      whatsappMessage: { id: 'wa-b', sentAt: new Date() },
       alreadySent: false,
+      outcome: 'SUBMITTED',
       outcomePending: false,
     });
 

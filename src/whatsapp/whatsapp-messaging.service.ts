@@ -14,6 +14,7 @@ import { isTerminalConversationStatus } from '../conversations/conversation-stat
 import { Prisma } from '../generated/prisma/client';
 import {
   CampaignStatus,
+  CampaignTargetStatus,
   ConversationStatus,
   MessageRole,
   MediaType,
@@ -29,8 +30,26 @@ import type { WhatsAppUnmatchedQueryDto } from './dto/whatsapp-unmatched-query.d
 import { WhatsAppClientService } from './whatsapp-client.service';
 import {
   WHATSAPP_TRANSPORT,
+  type ResolvedWhatsAppRecipient,
   type WhatsAppTransport,
 } from './transport/whatsapp-transport';
+
+export type WhatsAppSendOutcome =
+  'PRE_SUBMIT_FAILED' | 'SUBMITTED' | 'OUTCOME_UNKNOWN';
+
+export class WhatsAppPreSubmitError extends Error {
+  readonly retryable = true;
+  readonly outcome = 'PRE_SUBMIT_FAILED' as const;
+
+  constructor(
+    readonly code: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'WhatsAppPreSubmitError';
+  }
+}
 
 export type KnownInboundMessage = {
   contactId: string;
@@ -74,6 +93,7 @@ export class WhatsAppMessagingService {
       generation: number;
       chatId: string;
       bodyHash: string;
+      correlationId: string;
       createdAt: number;
     }
   >();
@@ -105,7 +125,13 @@ export class WhatsAppMessagingService {
       where: { messageId: data.messageId },
     });
     if (existing) {
-      return { whatsappMessage: this.safeMessage(existing), alreadySent: true };
+      return {
+        whatsappMessage: this.safeMessage(existing),
+        alreadySent: true,
+        outcome: this.persistedOutcome(existing.status),
+        outcomePending:
+          existing.status === WhatsAppMessageStatus.OUTCOME_UNKNOWN,
+      };
     }
 
     const message = await this.prisma.message.findFirst({
@@ -123,14 +149,40 @@ export class WhatsAppMessagingService {
     if (!contact) throw new NotFoundException('Контакт не найден');
 
     const phone = this.requirePhone(data.phone);
-    const chatId = this.toChatId(phone);
-    await this.ensureRegistered(chatId);
+    const candidateChatId = this.toChatId(phone);
+    const correlationId = randomUUID();
+    let recipient: ResolvedWhatsAppRecipient;
+    try {
+      recipient = await this.client.resolveRecipient(candidateChatId);
+    } catch (error) {
+      this.logRecipientResolution(correlationId, phone, null, error);
+      throw new WhatsAppPreSubmitError(
+        this.providerErrorCode(error, 'WHATSAPP_RECIPIENT_LOOKUP_FAILED'),
+        'WhatsApp recipient lookup failed before provider send',
+        { cause: error },
+      );
+    }
+    this.logRecipientResolution(correlationId, phone, recipient);
+    if (!recipient.registered || !recipient.canonicalChatId) {
+      throw new WhatsAppPreSubmitError(
+        'WHATSAPP_NOT_REGISTERED',
+        'Phone is not registered in WhatsApp',
+      );
+    }
+    const chatId = recipient.canonicalChatId;
 
-    const prepared = await this.createPendingAiMessage(data, phone);
+    const prepared = await this.createPendingAiMessage(
+      data,
+      phone,
+      correlationId,
+    );
     if (!prepared.shouldSend) {
       return {
         whatsappMessage: this.safeMessage(prepared.message),
         alreadySent: true,
+        outcome: this.persistedOutcome(prepared.message.status),
+        outcomePending:
+          prepared.message.status === WhatsAppMessageStatus.OUTCOME_UNKNOWN,
       };
     }
     const pending = prepared.message;
@@ -140,17 +192,35 @@ export class WhatsAppMessagingService {
       conversationId: data.conversationId,
       messageId: data.messageId,
       whatsAppMessageId: pending.id,
+      correlationId,
+      recipientHash: this.phoneHash(phone),
+      candidateDomain: 'c.us',
+      canonicalDomain: recipient.canonicalDomain,
+      resolutionSource: recipient.resolutionSource,
     });
     let sent: WebMessage | null | undefined;
     const pendingToken = this.trackPendingOutbound(
       pending.id,
       chatId,
       data.text,
+      correlationId,
     );
     try {
       sent = await this.client.sendText(chatId, data.text);
     } catch (error) {
       this.logProviderError(error, pending.id, data);
+      if (this.isDefinitivePreSubmitError(error)) {
+        this.pendingOutbound.delete(pendingToken);
+        await this.markFailed(
+          pending.id,
+          this.providerErrorCode(error, 'WHATSAPP_PRE_SUBMIT_FAILED'),
+        );
+        throw new WhatsAppPreSubmitError(
+          this.providerErrorCode(error, 'WHATSAPP_PRE_SUBMIT_FAILED'),
+          'WhatsApp send failed before provider submission',
+          { cause: error },
+        );
+      }
       const whatsappMessage = await this.markOutcomeUnknown(
         pending.id,
         this.providerErrorMessage(error),
@@ -158,6 +228,7 @@ export class WhatsAppMessagingService {
       return {
         whatsappMessage: this.safeMessage(whatsappMessage),
         alreadySent: false,
+        outcome: this.persistedOutcome(whatsappMessage.status),
         outcomePending:
           whatsappMessage.status === WhatsAppMessageStatus.OUTCOME_UNKNOWN,
       };
@@ -179,6 +250,7 @@ export class WhatsAppMessagingService {
       return {
         whatsappMessage: this.safeMessage(whatsappMessage),
         alreadySent: false,
+        outcome: this.persistedOutcome(whatsappMessage.status),
         outcomePending:
           whatsappMessage.status === WhatsAppMessageStatus.OUTCOME_UNKNOWN,
       };
@@ -210,6 +282,7 @@ export class WhatsAppMessagingService {
     return {
       whatsappMessage: this.safeMessage(whatsappMessage),
       alreadySent: false,
+      outcome: 'SUBMITTED' as const,
       outcomePending: false,
     };
   }
@@ -217,6 +290,7 @@ export class WhatsAppMessagingService {
   private async createPendingAiMessage(
     data: SendAiMessageInput,
     phone: string,
+    correlationId: string,
   ) {
     try {
       return {
@@ -224,6 +298,7 @@ export class WhatsAppMessagingService {
           data: {
             direction: WhatsAppMessageDirection.OUTBOUND,
             status: WhatsAppMessageStatus.PENDING,
+            correlationId,
             phone,
             text: data.text,
             contactId: data.contactId,
@@ -695,7 +770,19 @@ export class WhatsAppMessagingService {
         errorMessage: null,
       },
     });
-    if (updated.count > 0) this.pendingOutbound.delete(pending.token);
+    if (updated.count > 0) {
+      this.pendingOutbound.delete(pending.token);
+      this.logger.log({
+        event: 'WHATSAPP_MESSAGE_CREATE_CORRELATED',
+        correlationId: pending.correlationId,
+        whatsAppMessageId: pending.whatsAppMessageId,
+        generation,
+        providerMessageIdHash: this.identityHash(identity.value),
+        providerMessageIdDomain: this.providerIdDomain(identity.value),
+        messageCreateAt: new Date().toISOString(),
+      });
+      await this.reconcileCampaignSubmission(pending.whatsAppMessageId);
+    }
   }
 
   async handleAck(message: WebMessage, ack: MessageAck, generation = 0) {
@@ -707,7 +794,8 @@ export class WhatsAppMessagingService {
     this.logger.debug(
       JSON.stringify({
         event: 'WHATSAPP_ACK_RECEIVED',
-        externalMessageId,
+        providerMessageIdHash: this.identityHash(externalMessageId),
+        providerMessageIdDomain: this.providerIdDomain(externalMessageId),
         ack,
         mappedStatus: status,
       }),
@@ -715,7 +803,7 @@ export class WhatsAppMessagingService {
     if (ack === MessageAck.ACK_ERROR) {
       this.logger.error({
         event: 'WHATSAPP_ACK_ERROR',
-        externalMessageId,
+        providerMessageIdHash: this.identityHash(externalMessageId),
         recipientType: this.recipientType(message),
         generation,
         providerAck: ack,
@@ -854,12 +942,12 @@ export class WhatsAppMessagingService {
     }
     const outbound = await this.prisma.whatsAppMessage.findUnique({
       where: { externalMessageId },
-      select: { conversationId: true },
+      select: { conversationId: true, id: true, correlationId: true },
     });
     if (!outbound?.conversationId) return;
     const target = await this.prisma.campaignTarget.findUnique({
       where: { conversationId: outbound.conversationId },
-      select: { campaignId: true },
+      select: { id: true, campaignId: true, status: true },
     });
     if (!target) return;
 
@@ -875,15 +963,56 @@ export class WhatsAppMessagingService {
           ack === MessageAck.ACK_ERROR
             ? 'Cold outbound rejected by WhatsApp provider'
             : 'Cold outbound acknowledged by WhatsApp provider',
-        metadata: { ack, externalMessageId },
+        metadata: { ack, whatsAppMessageId: outbound.id },
       },
     });
+
+    if (ack === MessageAck.ACK_ERROR) {
+      await this.prisma.campaignTarget.updateMany({
+        where: {
+          id: target.id,
+          status: {
+            in: [
+              CampaignTargetStatus.MESSAGE_SENT,
+              CampaignTargetStatus.WAITING_REPLY,
+              CampaignTargetStatus.RECONCILIATION_REQUIRED,
+            ],
+          },
+        },
+        data: {
+          status: CampaignTargetStatus.RECONCILIATION_REQUIRED,
+          errorMessage:
+            'WhatsApp provider returned ACK_ERROR; manual reconciliation required',
+        },
+      });
+      this.logger.error({
+        event: 'WHATSAPP_CAMPAIGN_ACK_ERROR_RECONCILED',
+        campaignId: target.campaignId,
+        targetId: target.id,
+        whatsAppMessageId: outbound.id,
+        providerAck: ack,
+        targetStatus: CampaignTargetStatus.RECONCILIATION_REQUIRED,
+        correlationId: outbound.correlationId,
+      });
+    } else {
+      await this.prisma.campaignTarget.updateMany({
+        where: {
+          id: target.id,
+          status: CampaignTargetStatus.RECONCILIATION_REQUIRED,
+        },
+        data: {
+          status: CampaignTargetStatus.WAITING_REPLY,
+          messageSentAt: new Date(),
+          errorMessage: null,
+        },
+      });
+    }
 
     if (ack !== MessageAck.ACK_ERROR) {
       this.logger.log({
         event: 'WHATSAPP_COLD_OUTBOUND_CIRCUIT_RESET',
         campaignId: target.campaignId,
-        externalMessageId,
+        providerMessageIdHash: this.identityHash(externalMessageId),
         providerAck: ack,
       });
       return;
@@ -947,10 +1076,30 @@ export class WhatsAppMessagingService {
     });
   }
 
+  private async reconcileCampaignSubmission(whatsAppMessageId: string) {
+    const outbound = await this.prisma.whatsAppMessage.findUnique({
+      where: { id: whatsAppMessageId },
+      select: { conversationId: true, sentAt: true },
+    });
+    if (!outbound?.conversationId || !outbound.sentAt) return;
+    await this.prisma.campaignTarget.updateMany({
+      where: {
+        conversationId: outbound.conversationId,
+        status: CampaignTargetStatus.RECONCILIATION_REQUIRED,
+      },
+      data: {
+        status: CampaignTargetStatus.WAITING_REPLY,
+        messageSentAt: outbound.sentAt,
+        errorMessage: null,
+      },
+    });
+  }
+
   private trackPendingOutbound(
     whatsAppMessageId: string,
     chatId: string,
     body: string,
+    correlationId = randomUUID(),
   ) {
     this.prunePendingOutbound();
     const token = randomUUID();
@@ -960,6 +1109,7 @@ export class WhatsAppMessagingService {
       generation: this.client.getGeneration?.() ?? 0,
       chatId,
       bodyHash: this.bodyHash(body),
+      correlationId,
       createdAt: Date.now(),
     });
     return token;
@@ -1117,13 +1267,92 @@ export class WhatsAppMessagingService {
     }
   }
 
-  private async markFailed(id: string) {
+  private async markFailed(id: string, errorCode = 'WHATSAPP_SEND_FAILED') {
     await this.prisma.whatsAppMessage.update({
       where: { id },
       data: {
         status: WhatsAppMessageStatus.FAILED,
-        errorMessage: 'WhatsApp send failed',
+        errorMessage: errorCode,
       },
+    });
+  }
+
+  private persistedOutcome(status: WhatsAppMessageStatus): WhatsAppSendOutcome {
+    if (
+      status === WhatsAppMessageStatus.SENT ||
+      status === WhatsAppMessageStatus.DELIVERED ||
+      status === WhatsAppMessageStatus.READ
+    ) {
+      return 'SUBMITTED';
+    }
+    if (status === WhatsAppMessageStatus.OUTCOME_UNKNOWN) {
+      return 'OUTCOME_UNKNOWN';
+    }
+    return 'PRE_SUBMIT_FAILED';
+  }
+
+  private isDefinitivePreSubmitError(error: unknown) {
+    const coded = error as {
+      outcomeAmbiguous?: unknown;
+      code?: unknown;
+      response?: { code?: unknown };
+    } | null;
+    if (coded?.outcomeAmbiguous === false) return true;
+    const code = coded?.code ?? coded?.response?.code;
+    return (
+      typeof code === 'string' &&
+      [
+        'WHATSAPP_NOT_CONNECTED',
+        'WHATSAPP_RUNTIME_STABILIZING',
+        'WHATSAPP_RUNTIME_UNHEALTHY',
+      ].includes(code)
+    );
+  }
+
+  private providerErrorCode(error: unknown, fallback: string) {
+    const coded = error as {
+      code?: unknown;
+      response?: { code?: unknown };
+    } | null;
+    const code = coded?.code ?? coded?.response?.code;
+    return typeof code === 'string' && /^[A-Z0-9_]+$/.test(code)
+      ? code
+      : fallback;
+  }
+
+  private phoneHash(phone: string) {
+    return createHash('sha256').update(phone).digest('hex').slice(0, 16);
+  }
+
+  private identityHash(value: string) {
+    return createHash('sha256').update(value).digest('hex').slice(0, 16);
+  }
+
+  private providerIdDomain(value: string) {
+    if (value.includes('@lid')) return 'lid';
+    if (value.includes('@c.us')) return 'c.us';
+    return 'unknown';
+  }
+
+  private logRecipientResolution(
+    correlationId: string,
+    phone: string,
+    recipient: ResolvedWhatsAppRecipient | null,
+    error?: unknown,
+  ) {
+    this.logger.log({
+      event: 'WHATSAPP_RECIPIENT_RESOLUTION',
+      correlationId,
+      recipientHash: this.phoneHash(phone),
+      transport: 'whatsapp-webjs',
+      candidateDomain: 'c.us',
+      canonicalDomain: recipient?.canonicalDomain ?? 'unknown',
+      resolutionSource: recipient?.resolutionSource ?? 'fallback',
+      registered: recipient?.registered ?? false,
+      errorName: error instanceof Error ? error.name : null,
+      errorCode: error
+        ? this.providerErrorCode(error, 'WHATSAPP_RECIPIENT_LOOKUP_FAILED')
+        : null,
     });
   }
 

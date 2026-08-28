@@ -18,6 +18,7 @@ import {
 } from 'whatsapp-web.js';
 import { PrismaService } from '../prisma/prisma.service';
 import { WhatsAppConfigService } from './whatsapp-config.service';
+import type { ResolvedWhatsAppRecipient } from './transport/whatsapp-transport';
 
 type MessageHandler = (message: WebMessage) => Promise<void>;
 type MessageCreateHandler = (
@@ -209,6 +210,26 @@ export class WhatsAppClientService
     return value;
   }
 
+  private validCanonicalChatId(value: unknown) {
+    if (typeof value !== 'string' || !/^\d{7,20}@(c\.us|lid)$/.test(value)) {
+      return null;
+    }
+    return value;
+  }
+
+  private chatIdDomain(value: string | null) {
+    if (value?.endsWith('@c.us')) return 'c.us' as const;
+    if (value?.endsWith('@lid')) return 'lid' as const;
+    return 'unknown' as const;
+  }
+
+  private safeChatIdDomain(value: unknown) {
+    if (typeof value !== 'string') return null;
+    if (value.endsWith('@c.us')) return 'c.us';
+    if (value.endsWith('@lid')) return 'lid';
+    return 'unknown';
+  }
+
   initialize() {
     if (!this.config.enabled) return this.getStatus();
     if (this.currentOperation?.kind === 'INITIALIZE') {
@@ -363,6 +384,30 @@ export class WhatsAppClientService
     return this.client!.isRegisteredUser(chatId);
   }
 
+  async resolveRecipient(chatId: string): Promise<ResolvedWhatsAppRecipient> {
+    this.ensureConnected();
+    this.ensureRuntimeNotStabilizing();
+    const candidateChatId = this.validPhoneChatId(chatId);
+    if (!candidateChatId) {
+      return {
+        candidateChatId: chatId,
+        canonicalChatId: null,
+        canonicalDomain: 'unknown',
+        registered: false,
+        resolutionSource: 'fallback',
+      };
+    }
+    const result = await this.client!.getNumberId(candidateChatId);
+    const canonicalChatId = this.validCanonicalChatId(result?._serialized);
+    return {
+      candidateChatId,
+      canonicalChatId,
+      canonicalDomain: this.chatIdDomain(canonicalChatId),
+      registered: Boolean(canonicalChatId),
+      resolutionSource: 'getNumberId',
+    };
+  }
+
   async sendText(chatId: string, text: string) {
     this.ensureConnected();
     this.ensureRuntimeNotStabilizing();
@@ -391,8 +436,7 @@ export class WhatsAppClientService
         idInnerPresent: Boolean(
           WhatsAppClientService.nonEmptyString(candidate?.id?.id),
         ),
-        remote:
-          WhatsAppClientService.nonEmptyString(candidate?.id?.remote) ?? null,
+        remoteDomain: this.safeChatIdDomain(candidate?.id?.remote),
         fromMe: candidate?.id?.fromMe === true,
         constructorName:
           result && typeof result === 'object'
