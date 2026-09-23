@@ -13,6 +13,14 @@ export const IMPORT_FIELDS = [
   'notes',
 ] as const;
 
+export const REPEATABLE_IMPORT_FIELDS = [
+  'phone',
+  'whatsapp',
+  'website',
+  'email',
+  'notes',
+] as const;
+
 export const MAPPING_FIELDS = [...IMPORT_FIELDS, 'ignore'] as const;
 
 export type ImportField = (typeof IMPORT_FIELDS)[number];

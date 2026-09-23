@@ -50,10 +50,13 @@ const HEADER_ALIASES: Record<ImportField, string[]> = {
   address: ['Адрес', 'Полный адрес', 'Address'],
   email: ['Email', 'E-mail', 'Эл. почта', 'Электронная почта', 'Почта'],
   notes: [
+    'Описание',
     'Комментарий',
     'Комментарии',
+    'Комментарий к адресу',
     'Заметки',
     'Примечание',
+    'Часы работы',
     'Notes',
     'Description',
   ],
@@ -68,7 +71,13 @@ const HEADER_ALIASES: Record<ImportField, string[]> = {
   ],
 };
 
-const REPEATABLE_FIELDS = new Set<ImportField>(['phone', 'whatsapp']);
+const REPEATABLE_FIELDS = new Set<ImportField>([
+  'phone',
+  'whatsapp',
+  'website',
+  'email',
+  'notes',
+]);
 
 export function detectColumnMapping(headers: string[]) {
   const mapping: ColumnMapping = {};
