@@ -304,7 +304,8 @@ export class ImportsService {
             if (contactLinks.length > 0) {
               const values = Prisma.join(
                 contactLinks.map(
-                  ({ rowId, contactId }) => Prisma.sql`(${rowId}, ${contactId})`,
+                  ({ rowId, contactId }) =>
+                    Prisma.sql`(${rowId}, ${contactId})`,
                 ),
               );
               await tx.$executeRaw(
@@ -449,15 +450,20 @@ export class ImportsService {
 
     const website = this.firstValidUrl(valuesFor('website'), 'website', errors);
     const instagram = this.normalizeInstagram(firstFor('instagram'), errors);
-    const twoGisUrl = this.normalizeUrl(firstFor('twoGisUrl'), 'twoGisUrl', errors);
+    const twoGisUrl = this.normalizeUrl(
+      firstFor('twoGisUrl'),
+      'twoGisUrl',
+      errors,
+    );
     const bookingUrl = this.normalizeUrl(
       firstFor('bookingUrl'),
       'bookingUrl',
       errors,
     );
-    const email = valuesFor('email')
-      .map((value) => normalizedEmail(value))
-      .find((value): value is string => typeof value === 'string') ?? null;
+    const email =
+      valuesFor('email')
+        .map((value) => normalizedEmail(value))
+        .find((value): value is string => typeof value === 'string') ?? null;
     const notes = valuesFor('notes').join(' · ') || null;
 
     const normalizedData =
