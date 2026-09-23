@@ -311,9 +311,9 @@ export class ImportsService {
               await tx.$executeRaw(
                 Prisma.sql`
                   UPDATE "ImportRow" AS target
-                  SET "contactId" = links.contact_id::uuid
+                  SET "contactId" = links.contact_id
                   FROM (VALUES ${values}) AS links(row_id, contact_id)
-                  WHERE target.id = links.row_id::uuid
+                  WHERE target.id = links.row_id
                 `,
               );
             }
