@@ -33,14 +33,14 @@ describe('ImportsService 2GIS normalization', () => {
       '87051755565',
       'https://wa.me/77051755565',
       '+77051755565',
-      'PHONE',
+      'WHATSAPP',
     ],
     [
       'Barbershop DOSS',
       '87764488847 (администратор)',
       'https://wa.me/77764488847',
       '+77764488847',
-      'PHONE',
+      'WHATSAPP',
     ],
     [
       'Chistobarber',
@@ -73,7 +73,7 @@ describe('ImportsService 2GIS normalization', () => {
     },
   );
 
-  it('selects the first valid phone and retains the rest as metadata', () => {
+  it('prefers a known WhatsApp number and retains regular phones as metadata', () => {
     const result = normalize({
       Наименование: 'Multiple',
       Рубрики: null,
@@ -83,7 +83,12 @@ describe('ImportsService 2GIS normalization', () => {
       'WhatsApp 1': '77059006690',
     });
     expect(result).toMatchObject({
-      normalizedData: { phone: '+77051755565', extraPhones: ['+77059006690'] },
+      normalizedData: {
+        phone: '+77059006690',
+        whatsapp: '+77059006690',
+        phoneSource: 'WHATSAPP',
+        extraPhones: ['+77051755565'],
+      },
     });
   });
 
