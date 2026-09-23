@@ -8,7 +8,12 @@ describe('detectColumnMapping', () => {
       'Телефон 1',
       'Телефон 2',
       'Веб-сайт 1',
+      'Веб-сайт 2',
       'WhatsApp 1',
+      'E-mail 1',
+      'E-mail 2',
+      'Описание',
+      'Комментарий к адресу',
     ]);
     expect(result).toMatchObject({
       sourceProfile: '2GIS',
@@ -18,7 +23,12 @@ describe('detectColumnMapping', () => {
         'Телефон 1': 'phone',
         'Телефон 2': 'phone',
         'Веб-сайт 1': 'website',
+        'Веб-сайт 2': 'website',
         'WhatsApp 1': 'whatsapp',
+        'E-mail 1': 'email',
+        'E-mail 2': 'email',
+        Описание: 'notes',
+        'Комментарий к адресу': 'notes',
       },
       ambiguousColumns: [],
     });
