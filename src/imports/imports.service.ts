@@ -23,6 +23,7 @@ import type { ImportRowsQueryDto } from './dto/import-rows-query.dto';
 import type { ImportsQueryDto } from './dto/imports-query.dto';
 import {
   MAPPING_FIELDS,
+  REPEATABLE_IMPORT_FIELDS,
   type ColumnMapping,
   type ImportField,
   type NormalizedContactData,
@@ -114,15 +115,10 @@ export class ImportsService {
     const counts = this.countRows(processed);
 
     await this.prisma.$transaction(async (tx) => {
-      for (const row of processed) {
-        await tx.importRow.update({
-          where: {
-            importJobId_rowNumber: {
-              importJobId: id,
-              rowNumber: row.rowNumber,
-            },
-          },
-          data: this.toImportRowUpdate(row),
+      await tx.importRow.deleteMany({ where: { importJobId: id } });
+      for (const batch of this.chunk(processed, 1_000)) {
+        await tx.importRow.createMany({
+          data: batch.map((row) => this.toImportRowCreate(id, row)),
         });
       }
 
@@ -295,14 +291,30 @@ export class ImportsService {
               ...created.map(({ id: contactId }) => contactId),
             );
 
-            for (const { row, data } of rowsToCreate) {
-              await tx.importRow.update({
-                where: { id: row.id },
-                data: {
-                  status: ImportRowStatus.IMPORTED,
-                  contactId: contactsByPhone.get(data.phone),
-                },
-              });
+            const importedRowIds = rowsToCreate.map(({ row }) => row.id);
+            await tx.importRow.updateMany({
+              where: { id: { in: importedRowIds } },
+              data: { status: ImportRowStatus.IMPORTED },
+            });
+
+            const contactLinks = rowsToCreate.map(({ row, data }) => ({
+              rowId: row.id,
+              contactId: contactsByPhone.get(data.phone)!,
+            }));
+            if (contactLinks.length > 0) {
+              const values = Prisma.join(
+                contactLinks.map(
+                  ({ rowId, contactId }) => Prisma.sql`(${rowId}, ${contactId})`,
+                ),
+              );
+              await tx.$executeRaw(
+                Prisma.sql`
+                  UPDATE "ImportRow" AS target
+                  SET "contactId" = links.contact_id::uuid
+                  FROM (VALUES ${values}) AS links(row_id, contact_id)
+                  WHERE target.id = links.row_id::uuid
+                `,
+              );
             }
           }
 
@@ -400,27 +412,34 @@ export class ImportsService {
   }
 
   private normalizeRow(row: SourceRow, mapping: ColumnMapping) {
-    const mapped = Object.fromEntries(
-      Object.entries(mapping)
-        .filter(([, field]) => !['ignore', 'phone', 'whatsapp'].includes(field))
-        .map(([header, field]) => [field, this.text(row.rawData[header])]),
-    ) as Partial<Record<ImportField, string | null>>;
     const valuesFor = (field: ImportField) =>
       Object.entries(mapping)
         .filter(([, mappedField]) => mappedField === field)
         .map(([header]) => this.text(row.rawData[header]))
         .filter((value): value is string => Boolean(value));
+    const firstFor = (field: ImportField) => valuesFor(field)[0] ?? null;
+
     const rawPhones = valuesFor('phone');
     const rawWhatsApps = valuesFor('whatsapp');
-    const phones = rawPhones
-      .map(normalizePhone)
-      .filter((value): value is string => Boolean(value));
-    const whatsApps = rawWhatsApps
-      .map(normalizeWhatsAppPhone)
-      .filter((value): value is string => Boolean(value));
+    const phones = [
+      ...new Set(
+        rawPhones
+          .map(normalizePhone)
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ];
+    const whatsApps = [
+      ...new Set(
+        rawWhatsApps
+          .map(normalizeWhatsAppPhone)
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ];
     const errors: string[] = [];
-    const companyName = mapped.companyName ?? null;
-    const phone = phones[0] ?? whatsApps[0] ?? null;
+    const companyName = firstFor('companyName');
+    // A confirmed WhatsApp number is the safest primary destination for
+    // WhatsApp campaigns. Fall back to the first valid regular phone.
+    const phone = whatsApps[0] ?? phones[0] ?? null;
     const whatsapp = whatsApps[0] ?? null;
 
     if (!companyName) errors.push('Не указано название компании');
@@ -428,14 +447,18 @@ export class ImportsService {
       errors.push('Не найден телефон');
     else if (!phone) errors.push('Некорректный номер телефона');
 
-    const website = this.normalizeUrl(mapped.website, 'website', errors);
-    const instagram = this.normalizeInstagram(mapped.instagram, errors);
-    const twoGisUrl = this.normalizeUrl(mapped.twoGisUrl, 'twoGisUrl', errors);
+    const website = this.firstValidUrl(valuesFor('website'), 'website', errors);
+    const instagram = this.normalizeInstagram(firstFor('instagram'), errors);
+    const twoGisUrl = this.normalizeUrl(firstFor('twoGisUrl'), 'twoGisUrl', errors);
     const bookingUrl = this.normalizeUrl(
-      mapped.bookingUrl,
+      firstFor('bookingUrl'),
       'bookingUrl',
       errors,
     );
+    const email = valuesFor('email')
+      .map((value) => normalizedEmail(value))
+      .find((value): value is string => typeof value === 'string') ?? null;
+    const notes = valuesFor('notes').join(' · ') || null;
 
     const normalizedData =
       companyName && phone
@@ -443,26 +466,40 @@ export class ImportsService {
             companyName,
             phone,
             whatsapp,
-            phoneSource: phones[0] ? ('PHONE' as const) : ('WHATSAPP' as const),
+            phoneSource: whatsapp ? ('WHATSAPP' as const) : ('PHONE' as const),
             extraPhones: [
               ...new Set([
-                ...phones.slice(1),
                 ...whatsApps.filter((value) => value !== phone),
+                ...phones.filter((value) => value !== phone),
               ]),
             ],
-            city: mapped.city ?? null,
-            category: mapped.category ?? null,
+            city: firstFor('city'),
+            category: firstFor('category'),
             website,
             instagram,
             twoGisUrl,
             bookingUrl,
-            email: normalizedEmail(mapped.email) as string | null,
-            address: mapped.address ?? null,
-            notes: mapped.notes ?? null,
+            email,
+            address: firstFor('address'),
+            notes,
           }
         : null;
 
     return { ...row, normalizedData, errors };
+  }
+
+  private firstValidUrl(
+    values: string[],
+    field: string,
+    errors: string[],
+  ): string | null {
+    if (values.length === 0) return null;
+    for (const value of values) {
+      const normalized = normalizeHttpUrl(value);
+      if (normalized) return normalized;
+    }
+    errors.push(`Некорректный URL в поле ${field}`);
+    return null;
   }
 
   private normalizeUrl(
@@ -492,19 +529,16 @@ export class ImportsService {
   private validateMapping(input: Record<string, string>, headers: string[]) {
     const mapping: ColumnMapping = {};
     const used = new Set<string>();
-    for (const [header, field] of Object.entries(input)) {
+    const repeatable = new Set<string>(REPEATABLE_IMPORT_FIELDS);
+    for (const [header, inputField] of Object.entries(input)) {
+      const field = inputField === '' ? 'ignore' : inputField;
       if (
         !headers.includes(header) ||
         !MAPPING_FIELDS.includes(field as never)
       ) {
         throw new BadRequestException('Сопоставление колонок содержит ошибки');
       }
-      if (
-        field !== 'ignore' &&
-        used.has(field) &&
-        field !== 'phone' &&
-        field !== 'whatsapp'
-      ) {
+      if (field !== 'ignore' && used.has(field) && !repeatable.has(field)) {
         throw new BadRequestException('Сопоставление колонок содержит ошибки');
       }
       if (field !== 'ignore') used.add(field);
