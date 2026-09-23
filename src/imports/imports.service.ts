@@ -629,19 +629,6 @@ export class ImportsService {
     };
   }
 
-  private toImportRowUpdate(row: ProcessedRow) {
-    return {
-      status: row.status,
-      normalizedData: row.normalizedData
-        ? (row.normalizedData as Prisma.InputJsonValue)
-        : Prisma.DbNull,
-      errors: row.errors.length
-        ? (row.errors as Prisma.InputJsonValue)
-        : Prisma.DbNull,
-      contactId: null,
-    };
-  }
-
   private hasRequiredMapping(mapping: ColumnMapping) {
     const values = Object.values(mapping);
     return values.includes('companyName') && this.hasPhoneMapping(mapping);
