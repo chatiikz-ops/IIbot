@@ -76,12 +76,21 @@ describe('WppConnectTransport', () => {
     createMock.mockResolvedValue(client);
   });
 
-  it('handles QR and becomes CONNECTED using the same generation', async () => {
+  it('uses WPPConnect QR data URL directly and becomes CONNECTED', async () => {
+    const qrDataUrl = 'data:image/png;base64,c2FmZS1xci1pbWFnZQ==';
+    let transport: WppConnectTransport;
     createMock.mockImplementation(async (options) => {
-      await options.catchQR('safe-qr-value');
+      options.catchQR(qrDataUrl);
+      expect(transport.getQr()).toEqual(
+        expect.objectContaining({
+          available: true,
+          qrDataUrl,
+          generation: 1,
+        }),
+      );
       return client;
     });
-    const transport = new WppConnectTransport(prisma as never, config as never);
+    transport = new WppConnectTransport(prisma as never, config as never);
     await transport.initialize();
     expect((await transport.getStatus()).state).toBe('CONNECTED');
     expect(transport.getQr()).toEqual(
