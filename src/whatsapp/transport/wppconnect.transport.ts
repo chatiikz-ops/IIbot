@@ -16,7 +16,6 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import QRCode from 'qrcode';
 import {
   AckType,
   SocketState,
@@ -299,7 +298,8 @@ export class WppConnectTransport
         autoClose: 0,
         waitForLogin: true,
         puppeteerOptions: this.config.browserLaunchOptions,
-        catchQR: (qrCode) => void this.handleQr(qrCode, generation),
+        catchQR: (base64Qrimg) =>
+          void this.handleQr(base64Qrimg, generation),
         statusFind: (status) =>
           this.handleProviderState(String(status), generation),
       }),
@@ -327,11 +327,19 @@ export class WppConnectTransport
     );
   }
 
-  private async handleQr(qrCode: string, generation: number) {
+  private async handleQr(qrDataUrl: string, generation: number) {
     if (generation !== this.generation) return;
+    if (!qrDataUrl.startsWith('data:image/png;base64,')) {
+      this.logger.error({
+        event: 'WHATSAPP_TRANSPORT_QR_INVALID',
+        transport: 'wppconnect',
+        generation,
+      });
+      return;
+    }
     this.state = 'QR_REQUIRED';
     this.qr = {
-      dataUrl: await QRCode.toDataURL(qrCode),
+      dataUrl: qrDataUrl,
       createdAt: new Date(),
       generation,
     };
